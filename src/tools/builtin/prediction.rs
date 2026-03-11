@@ -1092,36 +1092,19 @@ async fn fetch_limitless_markets_15m(
         .or_else(|| raw.get("markets").and_then(|v| v.as_array()).cloned())
         .unwrap_or_default();
 
-    const FIFTEEN_M_KEYWORDS: &[&str] =
-        &["15m", "15min", "15 min", "15-minute", "15minute"];
-
+    // The endpoint returns active Crypto category markets. Filter to BTC only —
+    // titles use UTC timestamp format e.g. "$BTC above $70216 on Mar 11, 15:45 UTC?"
+    // so keyword matching on "btc" or "bitcoin" is sufficient.
     let markets: Vec<MarketEntry> = all_markets
         .iter()
         .filter(|m| {
             let title = m["title"].as_str().unwrap_or("").to_ascii_lowercase();
             let slug = m["slug"].as_str().unwrap_or("").to_ascii_lowercase();
-            FIFTEEN_M_KEYWORDS
-                .iter()
-                .any(|kw| title.contains(kw) || slug.contains(kw))
+            title.contains("btc") || title.contains("bitcoin")
+                || slug.contains("btc") || slug.contains("bitcoin")
         })
         .filter_map(|m| parse_market_entry(m))
         .collect();
-
-    if markets.is_empty() {
-        // Fallback: search endpoint
-        if let Ok(fb_resp) = client
-            .get("https://api.limitless.exchange/markets/search?query=btc+15m&limit=50")
-            .send()
-            .await
-        {
-            if fb_resp.status().is_success() {
-                if let Ok(fb_raw) = fb_resp.json::<serde_json::Value>().await {
-                    let fb_arr = fb_raw.as_array().cloned().unwrap_or_default();
-                    return Ok(fb_arr.iter().filter_map(|m| parse_market_entry(m)).collect());
-                }
-            }
-        }
-    }
 
     Ok(markets)
 }
