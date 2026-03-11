@@ -1092,17 +1092,8 @@ async fn fetch_limitless_markets_15m(
         .or_else(|| raw.get("markets").and_then(|v| v.as_array()).cloned())
         .unwrap_or_default();
 
-    // The endpoint returns active Crypto category markets. Filter to BTC only —
-    // titles use UTC timestamp format e.g. "$BTC above $70216 on Mar 11, 15:45 UTC?"
-    // so keyword matching on "btc" or "bitcoin" is sufficient.
     let markets: Vec<MarketEntry> = all_markets
         .iter()
-        .filter(|m| {
-            let title = m["title"].as_str().unwrap_or("").to_ascii_lowercase();
-            let slug = m["slug"].as_str().unwrap_or("").to_ascii_lowercase();
-            title.contains("btc") || title.contains("bitcoin")
-                || slug.contains("btc") || slug.contains("bitcoin")
-        })
         .filter_map(|m| parse_market_entry(m))
         .collect();
 
