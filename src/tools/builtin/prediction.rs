@@ -343,9 +343,11 @@ impl Tool for LimitlessFetchMarketsTool {
 
         let markets = fetch_limitless_markets_15m(&client).await?;
         let count = markets.len();
+        let active = count > 0;
 
         let snapshot = serde_json::json!({
             "fetched_at": fetched_at,
+            "active": active,
             "markets": markets,
         });
         let json = serde_json::to_string(&snapshot)
@@ -355,8 +357,22 @@ impl Tool for LimitlessFetchMarketsTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Memory write failed: {e}")))?;
 
+        if !active {
+            return Ok(ToolOutput::success(
+                serde_json::json!({
+                    "active": false,
+                    "count": 0,
+                    "fetched_at": fetched_at,
+                    "note": "No active BTC 15m markets. Downstream steps will skip this cycle.",
+                    "stored_at": "limitless/btc-15m/snapshot",
+                }),
+                start.elapsed(),
+            ));
+        }
+
         Ok(ToolOutput::success(
             serde_json::json!({
+                "active": true,
                 "count": count,
                 "fetched_at": fetched_at,
                 "markets": snapshot["markets"],
@@ -417,30 +433,56 @@ impl Tool for LimitlessComputeSignalTool {
             validate_ta_freshness(ta, 30)?;
         }
 
-        let snapshot_doc = self
-            .workspace
-            .read("limitless/btc-15m/snapshot")
-            .await
-            .map_err(|e| match e {
-                WorkspaceError::DocumentNotFound { .. } => ToolError::ExecutionFailed(
-                    "No market snapshot found. Run limitless_fetch_markets first.".to_string(),
-                ),
-                other => ToolError::ExecutionFailed(format!("Read failed: {other}")),
-            })?;
+        let snapshot_doc = match self.workspace.read("limitless/btc-15m/snapshot").await {
+            Ok(doc) => doc,
+            Err(WorkspaceError::DocumentNotFound { .. }) => {
+                return Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "status": "skipped",
+                        "reason": "No market snapshot in memory yet — limitless_fetch_markets has not run this cycle.",
+                    }),
+                    start.elapsed(),
+                ));
+            }
+            Err(e) => {
+                return Err(ToolError::ExecutionFailed(format!("Read snapshot failed: {e}")))
+            }
+        };
 
         let snapshot: serde_json::Value =
             serde_json::from_str(&snapshot_doc.content).map_err(|e| {
                 ToolError::ExecutionFailed(format!("Invalid market snapshot JSON: {e}"))
             })?;
 
+        // Skip entire cycle if no active markets were found upstream
+        if snapshot["active"].as_bool() == Some(false)
+            || snapshot["markets"]
+                .as_array()
+                .map_or(true, |a| a.is_empty())
+        {
+            return Ok(ToolOutput::success(
+                serde_json::json!({
+                    "status": "skipped",
+                    "reason": "No active BTC 15m markets this cycle.",
+                }),
+                start.elapsed(),
+            ));
+        }
+
         if let Some(ts) = snapshot["fetched_at"].as_str() {
             if let Ok(fetched_at) = chrono::DateTime::parse_from_rfc3339(ts) {
                 let age = now.signed_duration_since(fetched_at.with_timezone(&Utc));
                 if age.num_minutes() > 5 {
-                    return Err(ToolError::ExecutionFailed(format!(
-                        "Market snapshot is {} min old (max 5). Run limitless_fetch_markets.",
-                        age.num_minutes()
-                    )));
+                    return Ok(ToolOutput::success(
+                        serde_json::json!({
+                            "status": "skipped",
+                            "reason": format!(
+                                "Market snapshot is {} min old (max 5) — waiting for next cycle.",
+                                age.num_minutes()
+                            ),
+                        }),
+                        start.elapsed(),
+                    ));
                 }
             }
         }
@@ -654,31 +696,54 @@ impl Tool for LimitlessPlaceOrdersTool {
             .unwrap_or(false);
         let now = Utc::now();
 
-        // Read and validate signal
-        let signal_doc = self
-            .workspace
-            .read("limitless/btc-15m/signal")
-            .await
-            .map_err(|e| match e {
-                WorkspaceError::DocumentNotFound { .. } => ToolError::ExecutionFailed(
-                    "No signal found. Run limitless_compute_signal first.".to_string(),
-                ),
-                other => ToolError::ExecutionFailed(format!("Read failed: {other}")),
-            })?;
+        // Read and validate signal — skip gracefully if not yet written
+        let signal_doc = match self.workspace.read("limitless/btc-15m/signal").await {
+            Ok(doc) => doc,
+            Err(WorkspaceError::DocumentNotFound { .. }) => {
+                return Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "status": "skipped",
+                        "reason": "No signal in memory yet — upstream steps have not run this cycle.",
+                    }),
+                    start.elapsed(),
+                ));
+            }
+            Err(e) => return Err(ToolError::ExecutionFailed(format!("Read signal failed: {e}"))),
+        };
 
         let signal: serde_json::Value =
             serde_json::from_str(&signal_doc.content).map_err(|e| {
                 ToolError::ExecutionFailed(format!("Invalid signal JSON: {e}"))
             })?;
 
+        // Skip if signal was written with no active markets
+        if signal["markets"]
+            .as_array()
+            .map_or(false, |a| a.is_empty())
+        {
+            return Ok(ToolOutput::success(
+                serde_json::json!({
+                    "status": "skipped",
+                    "reason": "No active markets in signal — nothing to order this cycle.",
+                }),
+                start.elapsed(),
+            ));
+        }
+
         if let Some(ts) = signal["fetched_at"].as_str() {
             if let Ok(fetched_at) = chrono::DateTime::parse_from_rfc3339(ts) {
                 let age = now.signed_duration_since(fetched_at.with_timezone(&Utc));
                 if age.num_minutes() > 10 {
-                    return Err(ToolError::ExecutionFailed(format!(
-                        "Signal is {} min old (max 10). Run limitless_compute_signal.",
-                        age.num_minutes()
-                    )));
+                    return Ok(ToolOutput::success(
+                        serde_json::json!({
+                            "status": "skipped",
+                            "reason": format!(
+                                "Signal is {} min old (max 10) — waiting for next cycle.",
+                                age.num_minutes()
+                            ),
+                        }),
+                        start.elapsed(),
+                    ));
                 }
             }
         }

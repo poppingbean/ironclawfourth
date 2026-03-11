@@ -74,8 +74,9 @@ routine_create:
   tool_permissions:
     - limitless_place_orders
   prompt: |
-    Call limitless_place_orders. Do not output a report — background routine.
-    Log only errors or order failures.
+    Call limitless_place_orders. If the tool returns status "skipped", output
+    only: "Skipping — {reason}" and stop. Background routine — no report output
+    unless an order is placed or an error occurs.
 ```
 
 ## Full timing chain

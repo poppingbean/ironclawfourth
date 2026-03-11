@@ -65,8 +65,11 @@ routine_create:
   action_type: "full_job"
   cooldown_secs: 840
   prompt: |
-    Call btc_fetch_candles. Do not output a report — background routine.
-    Log errors only if a timeframe fails.
+    First read limitless/btc-15m/snapshot from memory. If it is missing or
+    its "active" field is false or its "markets" array is empty, output only:
+    "Skipping — no active markets this cycle." and stop. Otherwise call
+    btc_fetch_candles. Background routine — no report output unless a
+    timeframe fails.
 ```
 
 ## Full timing chain

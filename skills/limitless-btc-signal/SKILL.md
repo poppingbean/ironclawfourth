@@ -53,7 +53,9 @@ Each candle object has fields: `t` (open_time ms), `o` (open), `h` (high),
 `ct` (close_time ms). Use the **second-to-last** candle per timeframe as the
 most recent confirmed close.
 
-Abort with a clear error if any key is missing or older than 10 minutes.
+**If any key is missing** (DocumentNotFound), exit immediately with:
+`"Data not ready for this cycle — upstream steps have not run yet. Skipping."`
+Do **not** call any further tools. Do **not** report an error — this is expected on first run.
 
 ## Step 2 — Perform technical analysis
 
@@ -131,12 +133,16 @@ routine_create:
   action_type: "full_job"
   cooldown_secs: 840
   prompt: |
-    Read candles/btc/5m, candles/btc/15m, candles/btc/1h, candles/btc/4h and
-    limitless/btc-15m/snapshot from memory. Perform multi-timeframe technical
-    analysis (SMA, EMA, MACD, RSI, Bollinger Bands, volume) and compute a
-    YES/NO decision with USDC quantity for each active market. Write the result
-    to limitless/btc-15m/signal. Do not output a report — background routine.
-    Log only if SKIP or error.
+    Read limitless/btc-15m/snapshot from memory first. If missing, or if its
+    "active" field is false, or its "markets" array is empty, output only:
+    "Skipping — no active markets this cycle." and stop. Then read
+    candles/btc/5m, candles/btc/15m, candles/btc/1h, candles/btc/4h. If any
+    candle key is missing, output: "Skipping — candle data not ready." and
+    stop. Otherwise perform multi-timeframe technical analysis (SMA, EMA, MACD,
+    RSI, Bollinger Bands, volume) and compute a YES/NO decision with USDC
+    quantity for each active market. Write the result to
+    limitless/btc-15m/signal. Background routine — no output unless SKIP or
+    error.
 ```
 
 ## Full timing chain
