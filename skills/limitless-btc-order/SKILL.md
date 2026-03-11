@@ -26,14 +26,6 @@ activation:
     - order
     - execution
   max_context_tokens: 400
-metadata:
-  openclaw:
-    requires:
-      bins:
-        - limitless-cli
-      env:
-        - LIMITLESS_API_KEY
-        - LIMITLESS_PRIVATE_KEY
 ---
 
 # Limitless BTC 15m — Order Execution
