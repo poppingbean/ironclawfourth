@@ -15,12 +15,14 @@ use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
-    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
-    JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
-    ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
-    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
-    ToolUpgradeTool, WriteFileTool,
+    ApplyPatchTool, BtcFetchCandlesTool, BtcFetchTaTool, CancelJobTool, CreateJobTool, EchoTool,
+    ExtensionInfoTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
+    LimitlessComputeSignalTool, LimitlessFetchMarketsTool, LimitlessPlaceOrdersTool, ListDirTool,
+    ListJobsTool, MemoryReadTool,
+    MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool,
+    SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool,
+    ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
+    WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -75,6 +77,11 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "image_generate",
     "image_edit",
     "image_analyze",
+    "btc_fetch_candles",
+    "btc_fetch_ta",
+    "limitless_fetch_markets",
+    "limitless_compute_signal",
+    "limitless_place_orders",
 ];
 
 /// Registry of available tools.
@@ -304,6 +311,25 @@ impl ToolRegistry {
         self.register_sync(Arc::new(MemoryTreeTool::new(workspace)));
 
         tracing::debug!("Registered 4 memory tools");
+    }
+
+    /// Register prediction pipeline tools (BTC TA + Limitless Exchange).
+    ///
+    /// These tools replace manual LLM-driven API calls with native Rust
+    /// implementations, minimising LLM token usage for the trading pipeline.
+    /// Call this after `register_memory_tools()` since they share the workspace.
+    pub fn register_prediction_tools(&self, workspace: Arc<Workspace>) {
+        self.register_sync(Arc::new(BtcFetchCandlesTool::new(Arc::clone(&workspace))));
+        self.register_sync(Arc::new(BtcFetchTaTool::new(Arc::clone(&workspace))));
+        self.register_sync(Arc::new(LimitlessFetchMarketsTool::new(Arc::clone(
+            &workspace,
+        ))));
+        self.register_sync(Arc::new(LimitlessComputeSignalTool::new(Arc::clone(
+            &workspace,
+        ))));
+        self.register_sync(Arc::new(LimitlessPlaceOrdersTool::new(workspace)));
+
+        tracing::debug!("Registered 5 prediction tools");
     }
 
     /// Register job management tools.

@@ -1,6 +1,6 @@
 ---
 name: limitless-btc-markets
-version: 0.1.0
+version: 0.2.0
 description: "Query active BTC 15-minute prediction markets from Limitless Exchange using the public REST API. Use when asked about BTC 15m markets, current prediction prices, or Limitless Exchange market data."
 activation:
   keywords:
@@ -25,159 +25,52 @@ activation:
     - btc
     - prediction
     - limitless
-  max_context_tokens: 1500
+  max_context_tokens: 400
 ---
 
 # Limitless Exchange — BTC 15m Active Markets
 
-Use this skill whenever the user asks about active BTC 15-minute prediction markets on Limitless Exchange.
-
-## API Overview
-
-- **Base URL**: `https://api.limitless.exchange`
-- **Authentication**: None required for read operations (public API)
-- **Protocol**: HTTPS only
-
-## Step-by-Step Procedure
-
-### Step 1 — Fetch active BTC markets (category 2)
-
-Use category ID **2** to scope the request to the BTC/crypto category, minimizing payload size:
+Call the `limitless_fetch_markets` tool. It fetches active BTC 15-minute
+prediction markets from Limitless Exchange (category 2), filters for 15m
+markets, and stores the snapshot to memory.
 
 ```
-http tool:
-  method: GET
-  url: https://api.limitless.exchange/markets/active/2
+limitless_fetch_markets
 ```
 
-Only fall back to the broader search endpoint if category 2 returns no 15m markets:
+The tool stores results to `limitless/btc-15m/snapshot` and returns the
+filtered market list with YES/NO prices and liquidity. Present the results
+as a table to the user.
 
-```
-http tool:
-  method: GET
-  url: https://api.limitless.exchange/markets/search?query=btc+15m&limit=50
-```
+## Error handling
 
-No headers or authentication needed.
+- If the tool reports zero markets, tell the user and note that 15m markets
+  may not be active at the moment.
+- Do not make manual `http` calls — the tool handles the fallback search
+  endpoint automatically.
 
-### Step 2 — Filter for 15-minute resolution
+## Scheduled routine
 
-From the response, filter markets where the title, description, or slug contains any of:
-- `15m`
-- `15min`
-- `15 min`
-- `15-minute`
-
-Markets on Limitless Exchange use slug formats like `btc-above-XXXXX-15m` for 15-minute resolution.
-
-### Step 3 — Extract and display key fields
-
-For each matching market, extract and present:
-
-| Field | JSON path | Description |
-|-------|-----------|-------------|
-| Title | `title` | Market question/name |
-| Yes price | `outcomes[0].price` | Probability of YES (0.01–0.99) |
-| No price | `outcomes[1].price` | Probability of NO |
-| 24h Volume | `volume24h` | Trading volume last 24h (USDC) |
-| Liquidity | `liquidity` | Available liquidity (USDC) |
-| Open Interest | `openInterest` | Total open interest (USDC) |
-| Market ID | `marketId` | Unique identifier |
-
-### Step 4 — Format the output
-
-Present results as a markdown table:
-
-```
-| Market | YES | NO | Volume 24h | Liquidity |
-|--------|-----|----|------------|-----------|
-| BTC above $X in 15m | 0.62 | 0.38 | $12,450 | $8,200 |
-```
-
-If no 15m markets are found, report this clearly and show the top BTC markets instead (any resolution).
-
-### Step 5 — Optional: store results in memory
-
-If the user wants to track or compare market data over time, use `memory_write` to save the current snapshot:
-
-```
-memory_write key="limitless/btc-15m/snapshot" content="<snapshot>"
-```
-
-## Error Handling
-
-- **HTTP 4xx/5xx**: Report the status code and suggest retrying
-- **Empty response**: Inform the user and try the search endpoint with a broader query (`?query=btc&limit=100`)
-- **No 15m markets**: Show all active BTC markets and note that 15m markets may not be currently active
-
-## Scheduled Routine Setup
-
-To run this skill automatically every 15 minutes at T+2 minutes (fires at :02, :17, :32, :47 of every hour — 2 minutes after `btc-ta-15m` completes), create the following routine once:
-
-> _"Set up the limitless-markets-15m routine"_
-
-IronClaw will call `routine_create` with these exact parameters:
+To run automatically every 15 minutes at T+15 seconds, create the routine once:
 
 ```
 routine_create:
   name: "limitless-markets-15m"
-  description: "Fetch active BTC 15m prediction markets from Limitless Exchange (category 2) and store snapshot to memory."
+  description: "Fetch active BTC 15m prediction markets from Limitless Exchange and store snapshot to memory."
   trigger_type: "cron"
-  schedule: "0 2,17,32,47 * * * *"
+  schedule: "15 0,15,30,45 * * * *"
   action_type: "full_job"
   cooldown_secs: 840
-  tool_permissions:
-    - http
-    - memory_write
   prompt: |
-    Fetch active BTC 15-minute prediction markets from Limitless Exchange and store to memory.
-    1. Fetch active markets in category 2:
-       GET https://api.limitless.exchange/markets/active/2
-    2. Filter results for markets with "15m", "15min", or "15-minute" in the title or slug.
-    3. If no 15m markets found, fall back:
-       GET https://api.limitless.exchange/markets/search?query=btc+15m&limit=50
-    4. For each matching market extract: marketId, title, slug,
-       yes_price (outcomes[0].price), no_price (outcomes[1].price),
-       volume24h, liquidity, openInterest.
-    5. Store the filtered list to memory:
-       memory_write("limitless/btc-15m/snapshot", <JSON array with fetched_at UTC timestamp>)
-    6. Do not output a report — this is a background routine. Only log if no markets found or fetch fails.
+    Call limitless_fetch_markets. Do not output a report — background routine.
+    Log only if no markets found or fetch fails.
 ```
 
-**Cron field reference (6-field format):**
+## Full timing chain
 
 ```
-0   2,17,32,47  *  *  *  *
-│   │           │  │  │  └── weekday (any)
-│   │           │  │  └───── month (any)
-│   │           │  └──────── day (any)
-│   │           └─────────── hour (any)
-│   └─────────────────────── minute (2, 17, 32, 47)
-└─────────────────────────── second (0)
+:00:15  limitless-markets-15m → limitless/btc-15m/snapshot
+:02:00  binance-btc-ta        → candles/btc/{5m,15m,1h,4h}
+:04:00  limitless-signal-15m  → limitless/btc-15m/signal
+:06:00  limitless-order-15m   → orders placed
 ```
-
-**Timing chain:**
-
-```
-:00:15  btc-ta-15m fires       → TA data written to ta/btc/{5m,15m,1h,4h}
-:02:00  limitless-markets-15m  → market snapshot written to limitless/btc-15m/snapshot
-         (2 min gap ensures TA is ready before signal runs)
-```
-
-To verify:
-```
-routine_list
-```
-
-To manually trigger:
-```
-routine_fire name="limitless-markets-15m"
-```
-
-## Notes
-
-- The Limitless Exchange resolves markets using **Pyth Network oracles** (on-chain price feeds)
-- Markets run on the **Base network** (Chain ID 8453)
-- Prices are denominated in **USDC**
-- Trade types: **AMM** (Automated Market Maker) and **CLOB** (Central Limit Order Book)
-- For placing orders or managing positions, an API key and EIP-712 private key signature are required (out of scope for this read-only skill)
