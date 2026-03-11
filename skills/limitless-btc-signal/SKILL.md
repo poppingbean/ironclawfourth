@@ -27,7 +27,7 @@ activation:
     - prediction
     - signal
     - technical-analysis
-  max_context_tokens: 400
+  max_context_tokens: 2000
 ---
 
 # Limitless BTC 15m Signal — LLM Multi-Timeframe Analysis
