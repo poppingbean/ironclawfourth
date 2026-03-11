@@ -269,10 +269,42 @@ impl RoutineEngine {
             }
         };
 
+        // Grace window: if next_fire_at is more than 30s in the past this is a
+        // stale fire caused by a restart or first-creation timing.  Skip and
+        // reschedule to the next future occurrence so the pipeline runs in the
+        // correct order on the next cycle instead of firing everything at once.
+        const STALE_GRACE_SECS: i64 = 30;
+
         for routine in routines {
             if self.running_count.load(Ordering::Relaxed) >= self.config.max_concurrent_routines {
                 tracing::warn!("Global max concurrent routines reached, skipping remaining");
                 break;
+            }
+
+            // Skip stale fires and reschedule to next future occurrence.
+            if let Some(fire_at) = routine.next_fire_at {
+                let overdue = Utc::now().signed_duration_since(fire_at).num_seconds();
+                if overdue > STALE_GRACE_SECS {
+                    if let Trigger::Cron { ref schedule, ref timezone } = routine.trigger {
+                        if let Ok(Some(next)) = next_cron_fire(schedule, timezone.as_deref()) {
+                            let mut r = routine.clone();
+                            r.next_fire_at = Some(next);
+                            if let Err(e) = self.store.update_routine(&r).await {
+                                tracing::error!(
+                                    routine = %routine.name,
+                                    "Failed to reschedule stale routine: {e}"
+                                );
+                            }
+                        }
+                    }
+                    tracing::info!(
+                        routine = %routine.name,
+                        overdue_secs = overdue,
+                        "Skipping stale cron fire ({}s overdue) — rescheduled to next occurrence",
+                        overdue,
+                    );
+                    continue;
+                }
             }
 
             if !self.check_cooldown(&routine) {
