@@ -125,7 +125,15 @@ Order size (10%): $XX.XX USDC
 Markets to execute: N
 ```
 
-Ask the user to confirm before proceeding if `order_size_usdc > 50.00`. For amounts ≤ $50 per order, proceed automatically.
+For amounts ≤ $50 per order, proceed automatically. For amounts > $50, check for pre-approval in memory:
+
+```
+memory_read("limitless/order-approval")
+```
+
+If the key exists and is not empty → proceed. If missing → abort silently (log only). Do NOT ask the user in routine context.
+
+To pre-approve large orders, ask IronClaw once: _"Approve Limitless orders above $50"_ — it will write the approval key.
 
 ---
 
@@ -263,8 +271,96 @@ Results stored → limitless/btc-15m/orders/latest
 - **Never place an order on a stale signal (> 10 min old).** The 15m window may have already closed.
 - **Never retry a failed order automatically.** Report the failure and let the user decide.
 - **Never place a SELL order.** This skill only places BUY orders for YES or NO outcomes.
-- **Confirm before executing if total exposure > $50.** Calculate `N_orders × order_size_usdc` and ask if > $50.
+- **Gate on memory approval if total exposure > $50.** Check `limitless/order-approval` memory key. Abort silently if missing — never prompt the user in routine context.
 - **Skip any market with liquidity < 3× order size.** Thin books cause excessive slippage.
+
+---
+
+## Scheduled Routine Setup
+
+To run this skill automatically every 15 minutes at T+6 minutes (fires at :06, :21, :36, :51 of every hour — 2 minutes after `limitless-signal-15m` completes), create the following routine once:
+
+> _"Set up the limitless-order-15m routine"_
+
+IronClaw will call `routine_create` with these exact parameters:
+
+```
+routine_create:
+  name: "limitless-order-15m"
+  description: "Read YES/NO signal from memory, fetch live USDC balance, place orders on Limitless Exchange via limitless-cli. Max 10% per order."
+  trigger_type: "cron"
+  schedule: "0 6,21,36,51 * * * *"
+  action_type: "full_job"
+  cooldown_secs: 840
+  tool_permissions:
+    - http
+    - shell
+    - memory_read
+    - memory_write
+  prompt: |
+    Execute Limitless BTC 15m orders based on the stored signal.
+    1. Read the signal from memory:
+       memory_read("limitless/btc-15m/signal")
+       Abort if: missing | fetched_at older than 10 minutes | score < 5 | no YES/NO markets.
+    2. Fetch live USDC balance:
+       GET https://api.limitless.exchange/portfolio/trading/allowance?type=clob
+       Header: X-API-Key: {LIMITLESS_API_KEY env var}
+       Extract availableBalance. Abort if 0 or unparseable.
+       If no numeric balance field found, try:
+       GET https://api.limitless.exchange/portfolio
+       Header: X-API-Key: {LIMITLESS_API_KEY env var}
+    3. Calculate order size:
+       order_size = floor(availableBalance * 0.10 * 100) / 100
+       Abort if order_size < 1.00.
+    4. Filter signal markets: keep only recommendation=YES or NO.
+       Skip any market where liquidity < order_size * 3.
+       Abort silently (log only) if none remain after filtering.
+    5. Place each order via shell tool — one at a time, wait for result before next:
+       For score 9–10 (FOK):
+         limitless-cli order --slug "{slug}" --side buy --outcome {yes|no} --size {order_size} --order-type FOK
+       For score 5–8 (GTC):
+         limitless-cli order --slug "{slug}" --side buy --outcome {yes|no} --price {yes_price|no_price} --size {order_size} --order-type GTC
+    6. Store results:
+       memory_write("limitless/btc-15m/orders/latest", <JSON: executed_at, score, direction, balance, order_size, orders[]>)
+    7. Do not output a report — this is a background routine. Only log errors or order failures.
+    Note: LIMITLESS_API_KEY and LIMITLESS_PRIVATE_KEY are loaded from .env automatically.
+          Never confirm with the user — this is fully autonomous execution.
+          Never place orders if total exposure (N_orders × order_size) > $50 without prior user approval stored in memory at "limitless/order-approval".
+```
+
+**Cron field reference (6-field format):**
+
+```
+0   6,21,36,51  *  *  *  *
+│   │           │  │  │  └── weekday (any)
+│   │           │  │  └───── month (any)
+│   │           │  └──────── day (any)
+│   │           └─────────── hour (any)
+│   └─────────────────────── minute (6, 21, 36, 51)
+└─────────────────────────── second (0)
+```
+
+**Full automated timing chain:**
+
+```
+:00:15  btc-ta-15m            cron: 15 0,15,30,45 * * * *  → ta/btc/{5m,15m,1h,4h}       (~30s)
+:02:00  limitless-markets-15m cron: 0 2,17,32,47 * * * *   → limitless/btc-15m/snapshot   (~20s)
+:04:00  limitless-signal-15m  cron: 0 4,19,34,49 * * * *   → limitless/btc-15m/signal     (~15s)
+:06:00  limitless-order-15m   cron: 0 6,21,36,51 * * * *   → orders placed                (~30s)
+          ↑ fully autonomous — candle close to order in ~6 minutes
+```
+
+**`tool_permissions: [shell]`** — the `shell` tool requires explicit pre-authorization in routine context since it is an `Always`-approval tool. This grants it automatically when the routine fires.
+
+To verify:
+```
+routine_list
+```
+
+To manually trigger:
+```
+routine_fire name="limitless-order-15m"
+```
 
 ---
 

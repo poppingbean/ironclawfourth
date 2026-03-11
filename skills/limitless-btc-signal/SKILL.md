@@ -227,14 +227,97 @@ JSON structure:
 
 ---
 
+## Scheduled Routine Setup
+
+To run this skill automatically every 15 minutes at T+4 minutes (fires at :04, :19, :34, :49 of every hour — 2 minutes after `limitless-markets-15m` completes), create the following routine once:
+
+> _"Set up the limitless-signal-15m routine"_
+
+IronClaw will call `routine_create` with these exact parameters:
+
+```
+routine_create:
+  name: "limitless-signal-15m"
+  description: "Read BTC TA and Limitless market snapshots from memory, compute YES/NO signal, store result."
+  trigger_type: "cron"
+  schedule: "0 4,19,34,49 * * * *"
+  action_type: "full_job"
+  cooldown_secs: 840
+  tool_permissions:
+    - memory_read
+    - memory_write
+  prompt: |
+    Compute a YES/NO trading signal for active Limitless BTC 15m markets using stored TA data.
+    1. Read all four TA timeframes from memory:
+       memory_read("ta/btc/4h")
+       memory_read("ta/btc/1h")
+       memory_read("ta/btc/15m")
+       memory_read("ta/btc/5m")
+       If any key is missing or fetched_at is older than 30 minutes — abort and log the stale key.
+    2. Read the active Limitless market snapshot:
+       memory_read("limitless/btc-15m/snapshot")
+       If missing or fetched_at is older than 5 minutes — abort and log.
+    3. Score directional bias LONG vs SHORT (0–10) using the multi-timeframe cascade:
+       - 4h (heavy): SMA50 trend, MACD histogram, RSI direction
+       - 1h (medium): RSI level, MACD histogram slope, BB position, EMA12 vs EMA26
+       - 15m (light): EMA cross, RSI level, volume ratio
+       - 5m (tiebreaker): MACD histogram direction
+       Require ≥ 2 of 3 primary TFs (4h/1h/15m) to agree. Score < 5 or split → SKIP all markets.
+    4. Apply hard overrides:
+       - RSI > 80 on any TF → force SHORT
+       - RSI < 20 on any TF → force LONG
+       - BB squeeze (bb_width < 0.015) on 15m → SKIP
+       - Volume ratio on 15m < 0.4 → SKIP
+    5. For each market in the snapshot, compare strike price to current 15m close:
+       - Determine YES or NO based on directional bias and strike vs current price gap.
+       - Skip markets with liquidity < $500.
+       - Skip markets with YES price 0.45–0.55 if score < 7.
+    6. Store the signal to memory:
+       memory_write("limitless/btc-15m/signal", <JSON: fetched_at, direction, score, confidence, markets[]>)
+    7. Do not output a report — this is a background routine. Only log if SKIP or error.
+```
+
+**Cron field reference (6-field format):**
+
+```
+0   4,19,34,49  *  *  *  *
+│   │           │  │  │  └── weekday (any)
+│   │           │  │  └───── month (any)
+│   │           │  └──────── day (any)
+│   │           └─────────── hour (any)
+│   └─────────────────────── minute (4, 19, 34, 49)
+└─────────────────────────── second (0)
+```
+
+**Full timing chain:**
+
+```
+:00:15  btc-ta-15m            → ta/btc/{5m,15m,1h,4h} written        (~30s)
+:02:00  limitless-markets-15m → limitless/btc-15m/snapshot written    (~20s)
+:04:00  limitless-signal-15m  → limitless/btc-15m/signal written      (~15s)
+          ↑ signal ready ~4m 15s after candle close — well before the next 15m window
+```
+
+To verify:
+```
+routine_list
+```
+
+To manually trigger:
+```
+routine_fire name="limitless-signal-15m"
+```
+
+---
+
 ## Skill Chain
 
 This skill is designed to run **after** both upstream skills:
 
 ```
-1. binance-btc-ta   → fetches OHLCV, computes metrics, writes ta/btc/{5m,15m,1h,4h}
+1. binance-btc-ta         → fetches OHLCV, computes metrics, writes ta/btc/{5m,15m,1h,4h}
 2. limitless-btc-markets  → fetches active 15m markets, writes limitless/btc-15m/snapshot
 3. limitless-btc-signal   ← THIS SKILL: reads both, outputs YES/NO per market
 ```
 
-To run the full chain, ask: _"Run binance BTC TA, then fetch Limitless 15m markets, then give me the signal."_
+To run the full chain manually, ask: _"Run binance BTC TA, then fetch Limitless 15m markets, then give me the signal."_

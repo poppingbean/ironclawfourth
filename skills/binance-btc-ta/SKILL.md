@@ -227,6 +227,72 @@ memory_read key="ta/btc/15m"   → current RSI, MACD, trend
 - **Partial failure**: Store whichever timeframes succeeded, note failures in the summary
 - **Empty candles array**: Report and skip that timeframe
 
+## Scheduled Routine Setup
+
+To run this skill automatically every 15 minutes at T+15 seconds (i.e., fires at :00:15, :15:15, :30:15, :45:15 of every hour), create the following routine once by asking IronClaw:
+
+> _"Set up the btc-ta-15m routine"_
+
+IronClaw will call `routine_create` with these exact parameters:
+
+```
+routine_create:
+  name: "btc-ta-15m"
+  description: "Fetch BTC OHLCV from Binance for 5m/15m/1h/4h, compute TA metrics, store to memory."
+  trigger_type: "cron"
+  schedule: "15 0,15,30,45 * * * *"
+  action_type: "full_job"
+  cooldown_secs: 840
+  tool_permissions:
+    - http
+    - memory_write
+  prompt: |
+    Run the full BTC technical analysis fetch cycle:
+    1. Fetch BTC/USDT klines from Binance for 5m, 15m, 1h, and 4h (limit=100 each):
+       GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100
+       GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=100
+       GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=100
+       GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=100
+    2. Parse OHLCV (index 0=openTime, 1=open, 2=high, 3=low, 4=close, 5=volume).
+       Use candle[-2] (second-to-last) as the confirmed closed candle.
+    3. Compute per timeframe: SMA20, SMA50, EMA12, EMA26, MACD (line/signal/histogram),
+       RSI-14 (Wilder smoothing), Bollinger Bands (20-period 2σ: upper/middle/lower/width/position),
+       volume_avg_20, volume_ratio, and directional signals (trend/momentum/BB squeeze/overbought/oversold/volume spike).
+    4. Store each timeframe to memory:
+       memory_write("ta/btc/5m", <JSON metrics>)
+       memory_write("ta/btc/15m", <JSON metrics>)
+       memory_write("ta/btc/1h", <JSON metrics>)
+       memory_write("ta/btc/4h", <JSON metrics>)
+       memory_write("ta/btc/summary", <consolidated JSON with fetched_at UTC timestamp>)
+    5. Do not output a report — this is a background routine. Only log errors if a fetch fails.
+```
+
+**Cron field reference (6-field format):**
+
+```
+15  0,15,30,45  *  *  *  *
+│   │           │  │  │  └── weekday (any)
+│   │           │  │  └───── month (any)
+│   │           │  └──────── day (any)
+│   │           └─────────── hour (any)
+│   └─────────────────────── minute (0, 15, 30, 45)
+└─────────────────────────── second (15)
+```
+
+**Why T+15 seconds:** The 15-minute Binance candle closes exactly on the minute boundary. Waiting 15 seconds ensures the candle is fully settled and propagated to the API before fetching.
+
+**`cooldown_secs: 840`** (14 minutes) prevents double-fires if the routine is manually triggered while the cron is live.
+
+To verify the routine was created:
+```
+routine_list
+```
+
+To manually trigger a fetch immediately:
+```
+routine_fire name="btc-ta-15m"
+```
+
 ## Notes
 
 - Binance returns closes sorted oldest → newest; index `[-1]` (last element) is the **current forming candle** — use `[-2]` as the last **confirmed closed candle** for indicator accuracy
