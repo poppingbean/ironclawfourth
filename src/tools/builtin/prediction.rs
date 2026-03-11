@@ -341,8 +341,9 @@ impl Tool for LimitlessFetchMarketsTool {
         let client = build_http_client()?;
         let fetched_at = Utc::now().to_rfc3339();
 
-        let markets = fetch_limitless_markets_15m(&client).await?;
+        let (markets, raw_items) = fetch_limitless_markets_15m(&client).await?;
         let count = markets.len();
+        let raw_count = raw_items.len();
         let active = count > 0;
 
         let snapshot = serde_json::json!({
@@ -358,12 +359,26 @@ impl Tool for LimitlessFetchMarketsTool {
             .map_err(|e| ToolError::ExecutionFailed(format!("Memory write failed: {e}")))?;
 
         if !active {
+            // Include a sample of the raw API response so the user can see
+            // the actual field names if parse_market_entry is rejecting items.
+            let raw_sample = raw_items.first().cloned().unwrap_or(serde_json::Value::Null);
+            let raw_keys: Vec<String> = raw_sample
+                .as_object()
+                .map(|obj| obj.keys().cloned().collect())
+                .unwrap_or_default();
             return Ok(ToolOutput::success(
                 serde_json::json!({
                     "active": false,
                     "count": 0,
+                    "raw_items_from_api": raw_count,
                     "fetched_at": fetched_at,
-                    "note": "No active BTC 15m markets. Downstream steps will skip this cycle.",
+                    "note": if raw_count == 0 {
+                        "API returned 0 items — no active markets this cycle."
+                    } else {
+                        "API returned items but none could be parsed. Check raw_sample_keys."
+                    },
+                    "raw_sample_keys": raw_keys,
+                    "raw_sample": raw_sample,
                     "stored_at": "limitless/btc-15m/snapshot",
                 }),
                 start.elapsed(),
@@ -1065,9 +1080,10 @@ fn compute_ta(
     })
 }
 
+/// Returns (parsed_markets, raw_items) so the caller can expose raw shape for debugging.
 async fn fetch_limitless_markets_15m(
     client: &reqwest::Client,
-) -> Result<Vec<MarketEntry>, ToolError> {
+) -> Result<(Vec<MarketEntry>, Vec<serde_json::Value>), ToolError> {
     let resp = client
         .get("https://api.limitless.exchange/markets/active/2?limit=10&page=1")
         .send()
@@ -1086,46 +1102,111 @@ async fn fetch_limitless_markets_15m(
         .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Limitless parse error: {e}")))?;
 
-    let all_markets = raw
-        .as_array()
-        .cloned()
-        .or_else(|| raw.get("markets").and_then(|v| v.as_array()).cloned())
-        .unwrap_or_default();
+    // The Limitless Exchange API may return:
+    //   - a top-level array
+    //   - { "markets": [...] }
+    //   - { "data": [...] }
+    //   - { "data": { "markets": [...] } }
+    let all_markets: Vec<serde_json::Value> = if let Some(arr) = raw.as_array() {
+        arr.clone()
+    } else if let Some(arr) = raw.get("markets").and_then(|v| v.as_array()) {
+        arr.clone()
+    } else if let Some(arr) = raw.get("data").and_then(|v| v.as_array()) {
+        arr.clone()
+    } else if let Some(arr) = raw
+        .get("data")
+        .and_then(|d| d.get("markets"))
+        .and_then(|v| v.as_array())
+    {
+        arr.clone()
+    } else {
+        Vec::new()
+    };
 
     let markets: Vec<MarketEntry> = all_markets
         .iter()
         .filter_map(|m| parse_market_entry(m))
         .collect();
 
-    Ok(markets)
+    Ok((markets, all_markets))
 }
 
 fn parse_market_entry(m: &serde_json::Value) -> Option<MarketEntry> {
-    let market_id = m["marketId"]
+    // Support multiple field name conventions used by Limitless Exchange API.
+    // NOTE: The real API returns `id` as an integer and `conditionId` as a hex string.
+    let market_id = m["conditionId"]
         .as_str()
-        .or_else(|| m["id"].as_str())?
+        .map(|s| s.to_string())
+        .or_else(|| m["id"].as_u64().map(|n| n.to_string()))
+        .or_else(|| m["id"].as_str().map(|s| s.to_string()))
+        .or_else(|| m["marketId"].as_str().map(|s| s.to_string()))
+        .or_else(|| m["address"].as_str().map(|s| s.to_string()))?;
+
+    let title = m["title"]
+        .as_str()
+        .or_else(|| m["question"].as_str())?
         .to_string();
-    let title = m["title"].as_str()?.to_string();
+
     let slug = m["slug"]
         .as_str()
+        .or_else(|| m["market_slug"].as_str())
         .unwrap_or(&title)
         .to_string();
+
+    // YES price: outcomes[0].price, or prices[0], or yesPrice, or prices.yes
     let yes_price = m["outcomes"]
         .get(0)
         .and_then(|o| o["price"].as_f64())
+        .or_else(|| m["prices"].get(0).and_then(|v| v.as_f64()))
+        .or_else(|| m["yesPrice"].as_f64())
+        .or_else(|| m["prices"]["yes"].as_f64())
+        .or_else(|| m["outcomeTokenMarginalPrices"].get(0).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()))
         .unwrap_or(0.5);
+
+    // NO price: outcomes[1].price, or prices[1], or noPrice, or prices.no
     let no_price = m["outcomes"]
         .get(1)
         .and_then(|o| o["price"].as_f64())
-        .unwrap_or(0.5);
+        .or_else(|| m["prices"].get(1).and_then(|v| v.as_f64()))
+        .or_else(|| m["noPrice"].as_f64())
+        .or_else(|| m["prices"]["no"].as_f64())
+        .or_else(|| m["outcomeTokenMarginalPrices"].get(1).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()))
+        .unwrap_or(1.0 - yes_price);
+
+    // volume is returned as a string of micro-USDC (6 decimals); convert to USDC float.
+    let volume_24h = m["volume24h"]
+        .as_f64()
+        .or_else(|| m["volumeNum"].as_f64())
+        .or_else(|| m["volume"].as_f64())
+        .or_else(|| m["volume24h"].as_str().and_then(|s| s.parse::<f64>().ok()))
+        .or_else(|| {
+            m["volume"]
+                .as_str()
+                .and_then(|s| s.parse::<f64>().ok())
+                .map(|v| v / 1_000_000.0)
+        })
+        .or_else(|| {
+            m["volumeFormatted"]
+                .as_str()
+                .and_then(|s| s.parse::<f64>().ok())
+        })
+        .unwrap_or(0.0);
+
+    let liquidity = m["liquidity"]
+        .as_f64()
+        .or_else(|| m["liquidityNum"].as_f64())
+        .or_else(|| m["collateralVolume"].as_f64())
+        .or_else(|| m["liquidity"].as_str().and_then(|s| s.parse().ok()))
+        .unwrap_or(0.0);
+
     Some(MarketEntry {
         market_id,
         title,
         slug,
         yes_price,
         no_price,
-        volume_24h: m["volume24h"].as_f64().unwrap_or(0.0),
-        liquidity: m["liquidity"].as_f64().unwrap_or(0.0),
+        volume_24h,
+        liquidity,
     })
 }
 
