@@ -1069,7 +1069,7 @@ async fn fetch_limitless_markets_15m(
     client: &reqwest::Client,
 ) -> Result<Vec<MarketEntry>, ToolError> {
     let resp = client
-        .get("https://api.limitless.exchange/markets/active/2")
+        .get("https://api.limitless.exchange/markets/active/2?limit=10&page=1")
         .send()
         .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Limitless request failed: {e}")))?;
