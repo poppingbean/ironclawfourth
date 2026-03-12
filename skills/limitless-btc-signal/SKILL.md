@@ -122,14 +122,14 @@ Show a table with columns: Market, Strike, Decision, USDC, Reason.
 
 ## Scheduled routine
 
-To run automatically every 15 minutes at T+4 minutes, create the routine once:
+To run automatically every 15 minutes at T+5 minutes, create the routine once:
 
 ```
 routine_create:
   name: "limitless-signal-15m"
   description: "Read raw candles and market snapshot, perform LLM TA, write YES/NO signal to memory."
   trigger_type: "cron"
-  schedule: "0 4,19,34,49 * * * *"
+  schedule: "0 5,20,35,50 * * * *"
   action_type: "full_job"
   cooldown_secs: 840
   prompt: |
@@ -149,7 +149,7 @@ routine_create:
 
 ```
 :00:15  limitless-markets-15m      → limitless/btc-15m/snapshot
-:02:00  binance-btc-candles-15m    → candles/btc/{5m,15m,1h,4h}
-:04:00  limitless-signal-15m       → limitless/btc-15m/signal  ← this step
-:06:00  limitless-order-15m        → orders placed
+:02:00  binance-btc-candles-15m    → candles/btc/{5m,15m,1h}
+:05:00  limitless-signal-15m       → limitless/btc-15m/signal  ← this step
+:08:00  limitless-order-15m        → orders placed
 ```

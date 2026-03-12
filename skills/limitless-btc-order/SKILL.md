@@ -61,14 +61,14 @@ signal step first.
 
 ## Scheduled routine
 
-To run automatically every 15 minutes at T+6 minutes, create the routine once:
+To run automatically every 15 minutes at T+8 minutes, create the routine once:
 
 ```
 routine_create:
   name: "limitless-order-15m"
   description: "Read YES/NO signal from memory, fetch live USDC balance, place orders on Limitless Exchange via limitless-cli."
   trigger_type: "cron"
-  schedule: "0 6,21,36,51 * * * *"
+  schedule: "0 8,23,38,53 * * * *"
   action_type: "full_job"
   cooldown_secs: 840
   tool_permissions:
@@ -83,7 +83,7 @@ routine_create:
 
 ```
 :00:15  limitless-markets-15m      → limitless/btc-15m/snapshot
-:02:00  binance-btc-candles-15m    → candles/btc/{5m,15m,1h,4h}
-:04:00  limitless-signal-15m       → limitless/btc-15m/signal
-:06:00  limitless-order-15m        → orders placed          ← this step
+:02:00  binance-btc-candles-15m    → candles/btc/{5m,15m,1h}
+:05:00  limitless-signal-15m       → limitless/btc-15m/signal
+:08:00  limitless-order-15m        → orders placed          ← this step
 ```

@@ -73,6 +73,6 @@ routine_create:
 ```
 :00:15  limitless-markets-15m → limitless/btc-15m/snapshot
 :02:00  binance-btc-candles-15m → candles/btc/{5m,15m,1h}
-:04:00  limitless-signal-15m  → limitless/btc-15m/signal
-:06:00  limitless-order-15m   → orders placed
+:05:00  limitless-signal-15m  → limitless/btc-15m/signal
+:08:00  limitless-order-15m   → orders placed
 ```
