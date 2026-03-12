@@ -1,7 +1,7 @@
 ---
 name: limitless-btc-signal
-version: 0.2.0
-description: "Read raw BTC candles and active Limitless Exchange 15m markets from memory, perform multi-timeframe technical analysis, and produce a YES/NO decision with USDC order quantity for each open prediction market."
+version: 0.4.0
+description: "Fetch BTC/USDT OHLCV candles from Binance (5m/15m/1h), read active Limitless Exchange markets from memory, perform multi-timeframe technical analysis, and produce a YES/NO decision with USDC order quantity for each open prediction market."
 activation:
   keywords:
     - limitless signal
@@ -14,49 +14,73 @@ activation:
     - signal limitless
     - analyze limitless
     - ta signal limitless
+    - binance btc
+    - btc candles
+    - btc ohlcv
+    - fetch btc candles
+    - btc candlestick
+    - fetch btc data
+    - btc price data
+    - raw candles btc
+    - btc klines
   patterns:
     - "limitless.*(yes|no|signal|bet|predict)"
     - "btc.*15m.*(signal|predict|yes|no)"
     - "ta.*(limitless|prediction|market)"
     - "(yes|no).*limitless.*btc"
     - "analyze.*limitless.*market"
+    - "btc.*(5m|15m|1h)"
+    - "binance.*(btc|bitcoin)"
+    - "btc.*(candle|kline|ohlcv)"
+    - "fetch.*btc.*(data|candle)"
   tags:
     - trading
     - btc
+    - binance
     - limitless
+    - ohlcv
+    - candles
     - prediction
     - signal
     - technical-analysis
   max_context_tokens: 2000
 ---
 
-# Limitless BTC 15m Signal — LLM Multi-Timeframe Analysis
+# Limitless BTC 15m — Fetch Candles + Signal
 
-Read the raw candle data and the active market snapshot from memory, then
-perform your own technical analysis and produce a YES/NO decision with a USDC
-order quantity for each market.
+Fetch fresh BTC candles from Binance, then read the active market snapshot and
+produce a YES/NO decision for each open Limitless Exchange prediction market.
 
-## Step 1 — Load data from memory
+## Step 1 — Fetch candles from Binance
 
-Read the following memory keys:
+Call `btc_fetch_candles`. It fetches the last 100 BTC/USDT OHLCV candles for
+5m, 15m, and 1h concurrently and stores them to memory.
 
 ```
-memory_read: candles/btc/5m
-memory_read: candles/btc/15m
-memory_read: candles/btc/1h
+btc_fetch_candles
+```
+
+Stores to: `candles/btc/5m`, `candles/btc/15m`, `candles/btc/1h`.
+
+**If the tool returns errors for all timeframes**, stop and report the errors.
+Partial success (some timeframes stored) is acceptable — continue.
+
+**Important:** The last candle per timeframe is the currently forming candle.
+The second-to-last is the most recent confirmed closed candle.
+
+## Step 2 — Load market snapshot from memory
+
+```
 memory_read: limitless/btc-15m/snapshot
 ```
 
-Each candle object has fields: `t` (open_time ms), `o` (open), `h` (high),
-`l` (low), `c` (close), `v` (volume BTC), `qv` (quote volume USDT),
-`ct` (close_time ms). Use the **second-to-last** candle per timeframe as the
-most recent confirmed close.
+**If missing**, or if its `active` field is `false`, or its `markets` array is
+empty, output only: `"Skipping — no active markets this cycle."` and stop.
 
-**If any key is missing** (DocumentNotFound), exit immediately with:
-`"Data not ready for this cycle — upstream steps have not run yet. Skipping."`
-Do **not** call any further tools. Do **not** report an error — this is expected on first run.
+## Step 3 — Perform technical analysis
 
-## Step 2 — Perform technical analysis
+Each candle has fields: `t` (open_time ms), `o` (open), `h` (high), `l` (low),
+`c` (close), `v` (volume BTC), `qv` (quote volume USDT), `ct` (close_time ms).
 
 For each timeframe (5m, 15m, 1h) compute from the raw candles:
 
@@ -74,7 +98,7 @@ Score the multi-timeframe picture:
 - Sum the scores across all timeframes
 - Score ≥ +4 → strong YES bias; ≤ -4 → strong NO bias; -3 to +3 → mixed
 
-## Step 3 — Decision per market
+## Step 4 — Decision per market
 
 For each market in `limitless/btc-15m/snapshot`:
 
@@ -93,62 +117,62 @@ For each market in `limitless/btc-15m/snapshot`:
    - Minimum $1.00; if below, SKIP the market.
    - Maximum $50.00 per market without prior approval.
 
-## Step 4 — Write signal to memory
+## Step 5 — Write signal to memory
 
 Write the result to `limitless/btc-15m/signal`:
 
 ```json
 {
   "computed_at": "<ISO timestamp>",
-  "btc_price_15m": <last confirmed 15m close>,
-  "score": <integer -10 to +10>,
+  "btc_price_15m": "<last confirmed 15m close>",
+  "score": "<integer -10 to +10>",
   "markets": [
     {
       "market_id": "<id>",
       "title": "<title>",
-      "strike": <price>,
+      "strike": "<price>",
       "decision": "YES|NO|SKIP",
       "reason": "<brief explanation>",
-      "usdc_quantity": <float or null>
+      "usdc_quantity": "<float or null>"
     }
   ]
 }
 ```
 
-## Step 5 — Present results
+## Step 6 — Present results
 
 Show a table with columns: Market, Strike, Decision, USDC, Reason.
 
 ## Scheduled routine
 
-To run automatically every 15 minutes at T+5 minutes, create the routine once:
+Replaces both `binance-btc-candles-15m` and `limitless-signal-15m`. Create once
+at T+2 minutes:
 
 ```
 routine_create:
   name: "limitless-signal-15m"
-  description: "Read raw candles and market snapshot, perform LLM TA, write YES/NO signal to memory."
+  description: "Fetch BTC candles from Binance, perform LLM TA on 5m/15m/1h, write YES/NO signal to memory."
   trigger_type: "cron"
-  schedule: "0 5,20,35,50 * * * *"
+  schedule: "0 2,17,32,47 * * * *"
   action_type: "full_job"
   cooldown_secs: 840
   prompt: |
-    Read limitless/btc-15m/snapshot from memory first. If missing, or if its
+    Call btc_fetch_candles. If all timeframes fail, output the errors and stop.
+    Then read limitless/btc-15m/snapshot from memory. If missing, or if its
     "active" field is false, or its "markets" array is empty, output only:
-    "Skipping — no active markets this cycle." and stop. Then read
-    candles/btc/5m, candles/btc/15m, candles/btc/1h. If any
-    candle key is missing, output: "Skipping — candle data not ready." and
-    stop. Otherwise perform multi-timeframe technical analysis (SMA, EMA, MACD,
-    RSI, Bollinger Bands, volume) and compute a YES/NO decision with USDC
-    quantity for each active market. Write the result to
-    limitless/btc-15m/signal. Background routine — no output unless SKIP or
-    error.
+    "Skipping — no active markets this cycle." and stop.
+    Otherwise perform multi-timeframe technical analysis (SMA, EMA, MACD, RSI,
+    Bollinger Bands, volume) on 5m, 15m, and 1h candles and compute a YES/NO
+    decision with USDC quantity for each active market. Write the result to
+    limitless/btc-15m/signal. Background routine — no output unless SKIP or error.
 ```
+
+**Also delete** the now-redundant `binance-btc-candles-15m` routine.
 
 ## Full timing chain
 
 ```
-:00:15  limitless-markets-15m      → limitless/btc-15m/snapshot
-:02:00  binance-btc-candles-15m    → candles/btc/{5m,15m,1h}
-:05:00  limitless-signal-15m       → limitless/btc-15m/signal  ← this step
-:08:00  limitless-order-15m        → orders placed
+:00:15  limitless-markets-15m  → limitless/btc-15m/snapshot
+:02:00  limitless-signal-15m   → candles/btc/{5m,15m,1h} + limitless/btc-15m/signal
+:08:00  limitless-order-15m    → orders placed
 ```
