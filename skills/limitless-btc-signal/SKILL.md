@@ -44,7 +44,6 @@ Read the following memory keys:
 memory_read: candles/btc/5m
 memory_read: candles/btc/15m
 memory_read: candles/btc/1h
-memory_read: candles/btc/4h
 memory_read: limitless/btc-15m/snapshot
 ```
 
@@ -59,7 +58,7 @@ Do **not** call any further tools. Do **not** report an error — this is expect
 
 ## Step 2 — Perform technical analysis
 
-For each timeframe (5m, 15m, 1h, 4h) compute from the raw candles:
+For each timeframe (5m, 15m, 1h) compute from the raw candles:
 
 - **Trend**: SMA-20, SMA-50 — is price above or below each? Are they aligned?
 - **Momentum**: EMA-12 vs EMA-26, MACD direction (histogram positive/negative,
@@ -136,7 +135,7 @@ routine_create:
     Read limitless/btc-15m/snapshot from memory first. If missing, or if its
     "active" field is false, or its "markets" array is empty, output only:
     "Skipping — no active markets this cycle." and stop. Then read
-    candles/btc/5m, candles/btc/15m, candles/btc/1h, candles/btc/4h. If any
+    candles/btc/5m, candles/btc/15m, candles/btc/1h. If any
     candle key is missing, output: "Skipping — candle data not ready." and
     stop. Otherwise perform multi-timeframe technical analysis (SMA, EMA, MACD,
     RSI, Bollinger Bands, volume) and compute a YES/NO decision with USDC
