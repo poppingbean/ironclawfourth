@@ -68,15 +68,16 @@ routine_create:
   name: "limitless-order-15m"
   description: "Read YES/NO signal from memory, fetch live USDC balance, place orders on Limitless Exchange via limitless."
   trigger_type: "cron"
-  schedule: "0 8,23,38,53 * * * *"
+  schedule: "0 5,20,35,50 * * * *"
   action_type: "full_job"
   cooldown_secs: 840
   tool_permissions:
     - limitless_place_orders
   prompt: |
-    Call limitless_place_orders. If the tool returns status "skipped", output
-    only: "Skipping — {reason}" and stop. Background routine — no report output
-    unless an order is placed or an error occurs.
+    Call limitless_place_orders immediately. Do not search for tools, check
+    secrets, or verify credentials first — the tool handles all of that
+    internally via the limitless binary on PATH. If the tool returns
+    "skipped", output only: "skipped". Otherwise output exactly: "done".
 ```
 
 ## Full timing chain
@@ -84,5 +85,5 @@ routine_create:
 ```
 :00:15  limitless-markets-15m      → limitless/btc-15m/snapshot
 :02:00  limitless-signal-15m   → candles/btc/{5m,15m,1h} + limitless/btc-15m/signal
-:08:00  limitless-order-15m        → orders placed          ← this step
+:05:00  limitless-order-15m        → orders placed          ← this step
 ```

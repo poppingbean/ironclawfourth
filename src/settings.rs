@@ -397,7 +397,7 @@ fn default_agent_name() -> String {
 }
 
 fn default_max_parallel_jobs() -> u32 {
-    5
+    30
 }
 
 fn default_job_timeout() -> u64 {
@@ -1271,7 +1271,7 @@ mod tests {
         let loaded = Settings::load_toml(&path).unwrap().unwrap();
         assert_eq!(loaded.agent.name, "partial-bot");
         // Defaults preserved
-        assert_eq!(loaded.agent.max_parallel_jobs, 5);
+        assert_eq!(loaded.agent.max_parallel_jobs, 30);
         assert!(!loaded.heartbeat.enabled);
     }
 

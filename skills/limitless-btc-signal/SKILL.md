@@ -139,10 +139,6 @@ Write the result to `limitless/btc-15m/signal`:
 }
 ```
 
-## Step 6 — Present results
-
-Show a table with columns: Market, Strike, Decision, USDC, Reason.
-
 ## Scheduled routine
 
 Replaces both `binance-btc-candles-15m` and `limitless-signal-15m`. Create once
@@ -158,13 +154,11 @@ routine_create:
   cooldown_secs: 840
   prompt: |
     Call btc_fetch_candles. If all timeframes fail, output the errors and stop.
-    Then read limitless/btc-15m/snapshot from memory. If missing, or if its
-    "active" field is false, or its "markets" array is empty, output only:
-    "Skipping — no active markets this cycle." and stop.
-    Otherwise perform multi-timeframe technical analysis (SMA, EMA, MACD, RSI,
-    Bollinger Bands, volume) on 5m, 15m, and 1h candles and compute a YES/NO
-    decision with USDC quantity for each active market. Write the result to
-    limitless/btc-15m/signal. Background routine — no output unless SKIP or error.
+    Read limitless/btc-15m/snapshot from memory. If missing or markets empty,
+    output only: "Skipping — no active markets." and stop.
+    Otherwise perform multi-timeframe TA (SMA, EMA, MACD, RSI, BB, volume) on
+    5m/15m/1h candles, compute YES/NO/SKIP per market, write to
+    limitless/btc-15m/signal. Output exactly: "done".
 ```
 
 **Also delete** the now-redundant `binance-btc-candles-15m` routine.
@@ -174,5 +168,5 @@ routine_create:
 ```
 :00:15  limitless-markets-15m  → limitless/btc-15m/snapshot
 :02:00  limitless-signal-15m   → candles/btc/{5m,15m,1h} + limitless/btc-15m/signal
-:08:00  limitless-order-15m    → orders placed
+:05:00  limitless-order-15m    → orders placed
 ```
