@@ -85,9 +85,9 @@ impl Tool for BtcFetchCandlesTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch raw BTC/USDT OHLCV candlestick data from Binance for 5m, 15m, 1h, \
-         and 4h timeframes (last 100 confirmed candles each). Stores each timeframe \
-         to candles/btc/{interval} in memory for the signal step. No indicators are \
+        "Fetch raw BTC/USDT OHLCV candlestick data from Binance for 5m, 15m, and 1h \
+         timeframes (last 100 confirmed candles each). Stores each timeframe to \
+         candles/btc/{interval} in memory for the signal step. No indicators are \
          pre-computed — the LLM performs its own analysis. The second-to-last candle \
          per timeframe is the most recent confirmed close."
     }
@@ -105,23 +105,17 @@ impl Tool for BtcFetchCandlesTool {
         let client = build_http_client()?;
         let fetched_at = Utc::now().to_rfc3339();
 
-        // Fetch all 4 timeframes concurrently
-        let (r5m, r15m, r1h, r4h) = tokio::join!(
+        // Fetch 3 timeframes concurrently (4h excluded — not needed for 15m signal)
+        let (r5m, r15m, r1h) = tokio::join!(
             fetch_raw_candles(&client, "5m"),
             fetch_raw_candles(&client, "15m"),
             fetch_raw_candles(&client, "1h"),
-            fetch_raw_candles(&client, "4h"),
         );
 
         let mut summary: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         let mut errors: Vec<String> = Vec::new();
 
-        for (interval, result) in [
-            ("5m", r5m),
-            ("15m", r15m),
-            ("1h", r1h),
-            ("4h", r4h),
-        ] {
+        for (interval, result) in [("5m", r5m), ("15m", r15m), ("1h", r1h)] {
             match result {
                 Ok(rows) => {
                     let count = rows.as_array().map_or(0, |a| a.len());
