@@ -1,7 +1,7 @@
 ---
 name: limitless-btc-order
 version: 0.2.0
-description: "Read the YES/NO signal from memory and place orders on Limitless Exchange via the built-in order tool. Requires LIMITLESS_API_KEY, LIMITLESS_PRIVATE_KEY, and limitless-cli on PATH."
+description: "Read the YES/NO signal from memory and place orders on Limitless Exchange via the built-in order tool. Requires limitless on PATH with credentials configured."
 activation:
   keywords:
     - place order limitless
@@ -32,7 +32,7 @@ activation:
 
 Call the `limitless_place_orders` tool. It reads the signal from memory,
 fetches live USDC balance, calculates order size (10% of balance), and places
-orders via `limitless-cli`.
+orders via `limitless`.
 
 ```
 limitless_place_orders
@@ -66,7 +66,7 @@ To run automatically every 15 minutes at T+8 minutes, create the routine once:
 ```
 routine_create:
   name: "limitless-order-15m"
-  description: "Read YES/NO signal from memory, fetch live USDC balance, place orders on Limitless Exchange via limitless-cli."
+  description: "Read YES/NO signal from memory, fetch live USDC balance, place orders on Limitless Exchange via limitless."
   trigger_type: "cron"
   schedule: "0 8,23,38,53 * * * *"
   action_type: "full_job"

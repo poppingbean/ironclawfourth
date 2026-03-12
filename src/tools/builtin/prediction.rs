@@ -972,15 +972,15 @@ impl Tool for LimitlessCheckBalanceTool {
 
 /// Run `limitless-cli <args> -o json` and parse stdout as JSON.
 async fn run_limitless_cli_json(args: &[&str]) -> Result<serde_json::Value, String> {
-    let mut cmd = tokio::process::Command::new("limitless-cli");
+    let mut cmd = tokio::process::Command::new("limitless");
     cmd.args(args);
     cmd.args(["-o", "json"]);
     cmd.kill_on_drop(true);
 
     let output = tokio::time::timeout(Duration::from_secs(30), cmd.output())
         .await
-        .map_err(|_| "limitless-cli timed out".to_string())?
-        .map_err(|e| format!("limitless-cli failed to start: {e}"))?;
+        .map_err(|_| "limitless timed out".to_string())?
+        .map_err(|e| format!("limitless failed to start: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -1405,15 +1405,15 @@ fn parse_strike_from_title(title: &str) -> Option<f64> {
 /// Fetch USDC balance via `limitless-cli portfolio allowance -o json`.
 /// limitless-cli reads credentials from its own config — no env injection needed.
 async fn fetch_usdc_balance_via_cli() -> Result<f64, ToolError> {
-    let mut cmd = tokio::process::Command::new("limitless-cli");
+    let mut cmd = tokio::process::Command::new("limitless");
     cmd.args(["portfolio", "allowance", "-o", "json"]);
     cmd.kill_on_drop(true);
 
     let output = tokio::time::timeout(Duration::from_secs(30), cmd.output())
         .await
-        .map_err(|_| ToolError::ExecutionFailed("limitless-cli balance timed out".to_string()))?
+        .map_err(|_| ToolError::ExecutionFailed("limitless balance timed out".to_string()))?
         .map_err(|e| {
-            ToolError::ExecutionFailed(format!("limitless-cli failed to start: {e}"))
+            ToolError::ExecutionFailed(format!("limitless failed to start: {e}"))
         })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -1421,7 +1421,7 @@ async fn fetch_usdc_balance_via_cli() -> Result<f64, ToolError> {
 
     if !output.status.success() {
         return Err(ToolError::ExecutionFailed(format!(
-            "limitless-cli allowance exit {}: {stdout}{stderr}",
+            "limitless allowance exit {}: {stdout}{stderr}",
             output.status.code().unwrap_or(-1)
         )));
     }
@@ -1454,7 +1454,7 @@ async fn execute_limitless_order(
     size: f64,
     order_type: &str,
 ) -> Result<String, ToolError> {
-    let mut cmd = tokio::process::Command::new("limitless-cli");
+    let mut cmd = tokio::process::Command::new("limitless");
     cmd.args([
         "trading", "create",
         "--slug", slug,
@@ -1474,15 +1474,15 @@ async fn execute_limitless_order(
 
     let output = tokio::time::timeout(Duration::from_secs(30), cmd.output())
         .await
-        .map_err(|_| ToolError::ExecutionFailed("limitless-cli timed out after 30s".to_string()))?
-        .map_err(|e| ToolError::ExecutionFailed(format!("limitless-cli failed to start: {e}")))?;
+        .map_err(|_| ToolError::ExecutionFailed("limitless timed out after 30s".to_string()))?
+        .map_err(|e| ToolError::ExecutionFailed(format!("limitless failed to start: {e}")))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     if !output.status.success() {
         return Err(ToolError::ExecutionFailed(format!(
-            "limitless-cli exit {}: {stdout}{stderr}",
+            "limitless exit {}: {stdout}{stderr}",
             output.status.code().unwrap_or(-1),
         )));
     }
