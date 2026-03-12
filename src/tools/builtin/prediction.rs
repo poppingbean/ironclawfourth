@@ -10,7 +10,6 @@
 //!   `limitless_compute_signal` → score LONG/SHORT from memory → limitless/btc-15m/signal
 //!   `limitless_place_orders`   → read signal + place orders via limitless-cli
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -649,15 +648,15 @@ impl Tool for LimitlessComputeSignalTool {
 
 // ── Tool 4: limitless_place_orders ────────────────────────────────────────────
 
-/// Read the signal from memory, fetch live USDC balance, and place orders via
-/// the `limitless-cli` subprocess. Order size is capped at 10% of available
-/// balance.
+/// Read the signal from memory, fetch live USDC balance via `limitless-cli`,
+/// and place orders via `limitless-cli`. Order size is capped at 10% of
+/// available balance.
 ///
-/// Requires:
-/// - `LIMITLESS_API_KEY` in environment (loaded from .env at startup)
-/// - `LIMITLESS_PRIVATE_KEY` in environment (used by limitless-cli for EIP-712
-///   signing)
-/// - `limitless-cli` on PATH
+/// Credentials (API key and private key) are read from limitless-cli's own
+/// config (`~/.config/limitless/` or its `.env` file). Do NOT store them in
+/// IronClaw's `.env`.
+///
+/// Requires: `limitless-cli` on PATH
 pub struct LimitlessPlaceOrdersTool {
     workspace: Arc<Workspace>,
 }
@@ -679,7 +678,7 @@ impl Tool for LimitlessPlaceOrdersTool {
          balance from Limitless Exchange, and place orders via limitless-cli. \
          Order size is capped at 10% of available balance. Aborts if signal is \
          stale (> 10 min), score < 5, or insufficient funds. Requires \
-         LIMITLESS_API_KEY, LIMITLESS_PRIVATE_KEY, and limitless-cli on PATH."
+         limitless-cli on PATH. Credentials are read from limitless-cli's own config."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -702,7 +701,7 @@ impl Tool for LimitlessPlaceOrdersTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        ctx: &JobContext,
+        _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let dry_run = params
@@ -798,18 +797,6 @@ impl Tool for LimitlessPlaceOrdersTool {
             ));
         }
 
-        // Resolve LIMITLESS_API_KEY: extra_env first, then process env
-        let api_key = ctx
-            .extra_env
-            .get("LIMITLESS_API_KEY")
-            .cloned()
-            .or_else(|| std::env::var("LIMITLESS_API_KEY").ok())
-            .ok_or_else(|| {
-                ToolError::ExecutionFailed(
-                    "LIMITLESS_API_KEY not set. Add it to .env.".to_string(),
-                )
-            })?;
-
         // Large-order pre-approval gate (> $50 total)
         let order_approval = self
             .workspace
@@ -817,8 +804,7 @@ impl Tool for LimitlessPlaceOrdersTool {
             .await
             .ok();
 
-        let client = build_http_client()?;
-        let available_balance = fetch_usdc_balance(&client, &api_key).await?;
+        let available_balance = fetch_usdc_balance_via_cli().await?;
 
         if available_balance <= 0.0 {
             return Err(ToolError::ExecutionFailed(format!(
@@ -890,7 +876,6 @@ impl Tool for LimitlessPlaceOrdersTool {
                 price,
                 order_size,
                 order_type,
-                &ctx.extra_env,
             )
             .await;
 
@@ -935,6 +920,85 @@ impl Tool for LimitlessPlaceOrdersTool {
 
         Ok(ToolOutput::success(result, start.elapsed()))
     }
+}
+
+// ── Tool 5: limitless_check_balance ───────────────────────────────────────────
+
+/// Check USDC balance and open positions via `limitless-cli`.
+/// Credentials are read from limitless-cli's own config — nothing stored in IronClaw .env.
+pub struct LimitlessCheckBalanceTool;
+
+impl LimitlessCheckBalanceTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl Tool for LimitlessCheckBalanceTool {
+    fn name(&self) -> &str {
+        "limitless_check_balance"
+    }
+
+    fn description(&self) -> &str {
+        "Check your USDC trading allowance and open positions on Limitless Exchange via \
+         limitless-cli. Returns available balance (from portfolio allowance) and current \
+         open positions. Credentials are read from limitless-cli's own config."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        // Run both commands concurrently
+        let (allowance_result, positions_result) = tokio::join!(
+            run_limitless_cli_json(&["portfolio", "allowance"]),
+            run_limitless_cli_json(&["portfolio", "positions"]),
+        );
+
+        let allowance = allowance_result.unwrap_or_else(|e| serde_json::json!({ "error": e }));
+        let positions = positions_result.unwrap_or_else(|e| serde_json::json!({ "error": e }));
+
+        Ok(ToolOutput::success(
+            serde_json::json!({
+                "allowance": allowance,
+                "positions": positions,
+            }),
+            start.elapsed(),
+        ))
+    }
+}
+
+/// Run `limitless-cli <args> -o json` and parse stdout as JSON.
+async fn run_limitless_cli_json(args: &[&str]) -> Result<serde_json::Value, String> {
+    let mut cmd = tokio::process::Command::new("limitless-cli");
+    cmd.args(args);
+    cmd.args(["-o", "json"]);
+    cmd.kill_on_drop(true);
+
+    let output = tokio::time::timeout(Duration::from_secs(30), cmd.output())
+        .await
+        .map_err(|_| "limitless-cli timed out".to_string())?
+        .map_err(|e| format!("limitless-cli failed to start: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        return Err(format!(
+            "exit {}: {stdout}{stderr}",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+
+    serde_json::from_str(stdout.trim()).map_err(|e| format!("JSON parse failed: {e}: {stdout}"))
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -1344,64 +1408,49 @@ fn parse_strike_from_title(title: &str) -> Option<f64> {
         .and_then(|s| s.trim_end_matches('.').parse::<f64>().ok())
 }
 
-async fn fetch_usdc_balance(
-    client: &reqwest::Client,
-    api_key: &str,
-) -> Result<f64, ToolError> {
-    let primary = client
-        .get("https://api.limitless.exchange/portfolio/trading/allowance?type=clob")
-        .header("X-API-Key", api_key)
-        .send()
+/// Fetch USDC balance via `limitless-cli portfolio allowance -o json`.
+/// limitless-cli reads credentials from its own config — no env injection needed.
+async fn fetch_usdc_balance_via_cli() -> Result<f64, ToolError> {
+    let mut cmd = tokio::process::Command::new("limitless-cli");
+    cmd.args(["portfolio", "allowance", "-o", "json"]);
+    cmd.kill_on_drop(true);
+
+    let output = tokio::time::timeout(Duration::from_secs(30), cmd.output())
         .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("Balance request failed: {e}")))?;
+        .map_err(|_| ToolError::ExecutionFailed("limitless-cli balance timed out".to_string()))?
+        .map_err(|e| {
+            ToolError::ExecutionFailed(format!("limitless-cli failed to start: {e}"))
+        })?;
 
-    if primary.status().is_success() {
-        let body: serde_json::Value = primary
-            .json()
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Balance parse failed: {e}")))?;
-        if let Some(b) = extract_balance_field(&body) {
-            return Ok(b);
-        }
-    }
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    // Fallback: /portfolio endpoint
-    let fallback = client
-        .get("https://api.limitless.exchange/portfolio")
-        .header("X-API-Key", api_key)
-        .send()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("Balance fallback failed: {e}")))?;
-
-    if !fallback.status().is_success() {
+    if !output.status.success() {
         return Err(ToolError::ExecutionFailed(format!(
-            "Balance endpoint returned HTTP {}",
-            fallback.status()
+            "limitless-cli allowance exit {}: {stdout}{stderr}",
+            output.status.code().unwrap_or(-1)
         )));
     }
 
-    let body: serde_json::Value = fallback
-        .json()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("Balance fallback parse failed: {e}")))?;
+    let body: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|e| {
+        ToolError::ExecutionFailed(format!("Balance JSON parse failed: {e}: {stdout}"))
+    })?;
 
-    extract_balance_field(&body).ok_or_else(|| {
-        ToolError::ExecutionFailed(format!("Cannot find balance field in response: {body}"))
-    })
-}
-
-fn extract_balance_field(v: &serde_json::Value) -> Option<f64> {
-    for key in &["availableBalance", "usdcBalance", "balance", "collateral"] {
-        if let Some(f) = v[key].as_f64() {
-            return Some(f);
+    // The allowance response contains the available USDC balance
+    for key in &["availableBalance", "usdcBalance", "balance", "collateral", "allowance"] {
+        if let Some(f) = body[key].as_f64() {
+            return Ok(f);
         }
-        if let Some(s) = v[key].as_str() {
+        if let Some(s) = body[key].as_str() {
             if let Ok(f) = s.parse::<f64>() {
-                return Some(f);
+                return Ok(f);
             }
         }
     }
-    None
+
+    Err(ToolError::ExecutionFailed(format!(
+        "Cannot find balance field in allowance response: {body}"
+    )))
 }
 
 async fn execute_limitless_order(
@@ -1410,23 +1459,23 @@ async fn execute_limitless_order(
     price: f64,
     size: f64,
     order_type: &str,
-    extra_env: &HashMap<String, String>,
 ) -> Result<String, ToolError> {
     let mut cmd = tokio::process::Command::new("limitless-cli");
-    cmd.args(["order", "--slug", slug, "--side", "buy", "--outcome", outcome]);
+    cmd.args([
+        "trading", "create",
+        "--slug", slug,
+        "--side", "buy",
+        "--outcome", outcome,
+        "--size", &format!("{size:.2}"),
+        "--order-type", order_type,
+        "-o", "json",
+    ]);
 
     if order_type == "GTC" {
         cmd.args(["--price", &format!("{price:.4}")]);
     }
-    cmd.args([
-        "--size",
-        &format!("{size:.2}"),
-        "--order-type",
-        order_type,
-    ]);
 
-    // Inject credentials from extra_env and process environment
-    cmd.envs(extra_env);
+    // limitless-cli reads credentials from its own config; do not inject IronClaw env vars.
     cmd.kill_on_drop(true);
 
     let output = tokio::time::timeout(Duration::from_secs(30), cmd.output())
