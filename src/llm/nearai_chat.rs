@@ -540,7 +540,7 @@ impl LlmProvider for NearAiChatProvider {
             messages
         };
 
-        let tools: Vec<ChatCompletionTool> = req
+        let mut tools: Vec<ChatCompletionTool> = req
             .tools
             .into_iter()
             .map(|t| ChatCompletionTool {
@@ -552,6 +552,22 @@ impl LlmProvider for NearAiChatProvider {
                 },
             })
             .collect();
+
+        // NearAI rejects request bodies above ~82 KB. If the tool schemas alone
+        // are already large, strip per-property descriptions (which are verbose
+        // but not needed for tool dispatch) to bring the body under the limit.
+        const TOOL_SCHEMA_SIZE_THRESHOLD: usize = 60_000;
+        if serde_json::to_vec(&tools).map_or(0, |v| v.len()) > TOOL_SCHEMA_SIZE_THRESHOLD {
+            tracing::debug!(
+                "Tool schemas exceed {} bytes — stripping property descriptions to reduce request size",
+                TOOL_SCHEMA_SIZE_THRESHOLD
+            );
+            for tool in &mut tools {
+                if let Some(params) = tool.function.parameters.take() {
+                    tool.function.parameters = Some(compact_tool_params(params));
+                }
+            }
+        }
 
         let request = ChatCompletionRequest {
             model,
@@ -1072,6 +1088,23 @@ struct ChatCompletionUsage {
 
 fn saturate_u32(val: u64) -> u32 {
     val.min(u32::MAX as u64) as u32
+}
+
+/// Strip `description` from every property entry in a JSON Schema `properties` map.
+/// Preserves `type`, `enum`, `default`, `items`, and other structural fields.
+/// Used to shrink tool schemas when the request body approaches the API size limit.
+fn compact_tool_params(mut params: serde_json::Value) -> serde_json::Value {
+    if let Some(props) = params
+        .get_mut("properties")
+        .and_then(|p| p.as_object_mut())
+    {
+        for prop in props.values_mut() {
+            if let Some(obj) = prop.as_object_mut() {
+                obj.remove("description");
+            }
+        }
+    }
+    params
 }
 
 fn parse_usage(usage: Option<&ChatCompletionUsage>) -> (u32, u32) {

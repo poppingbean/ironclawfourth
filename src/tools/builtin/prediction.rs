@@ -1739,13 +1739,33 @@ fn parse_strike_from_title(title: &str) -> Option<f64> {
 }
 
 
+/// Read an environment variable from the process environment, falling back to
+/// `~/.ironclaw/.env` at call-time so credentials added after startup are visible.
+fn read_env_var(key: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(key) {
+        return Some(v);
+    }
+    let env_path = crate::bootstrap::ironclaw_env_path();
+    if env_path.exists() {
+        if let Ok(iter) = dotenvy::from_path_iter(&env_path) {
+            for item in iter.flatten() {
+                if item.0 == key {
+                    return Some(item.1);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Resolve the `limitless` binary path.
 ///
 /// Checks `LIMITLESS_CLI_PATH` first (allows pointing to a full path like
 /// `C:\TrustFlow\limitless-cli\target\release\limitless.exe`), then falls
 /// back to `"limitless"` (assumes it's on PATH).
 fn limitless_cli_cmd() -> tokio::process::Command {
-    let bin = std::env::var("LIMITLESS_CLI_PATH").unwrap_or_else(|_| "limitless".to_string());
+    let bin = read_env_var("LIMITLESS_CLI_PATH")
+        .unwrap_or_else(|| "limitless".to_string());
     tokio::process::Command::new(bin)
 }
 
@@ -1755,14 +1775,14 @@ fn limitless_cli_cmd() -> tokio::process::Command {
 /// (loaded at startup from `~/.ironclaw/.env` by bootstrap).
 /// USDC contract on Base: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 (6 decimals).
 async fn fetch_usdc_balance_via_basescan() -> Result<f64, ToolError> {
-    let api_key = std::env::var("BASESCAN_API_KEY").map_err(|_| {
+    let api_key = read_env_var("BASESCAN_API_KEY").ok_or_else(|| {
         ToolError::ExecutionFailed(
-            "BASESCAN_API_KEY not set — add it to ~/.ironclaw/.env and restart".to_string(),
+            "BASESCAN_API_KEY not set — add it to ~/.ironclaw/.env".to_string(),
         )
     })?;
-    let wallet = std::env::var("LIMITLESS_WALLET_ADDRESS").map_err(|_| {
+    let wallet = read_env_var("LIMITLESS_WALLET_ADDRESS").ok_or_else(|| {
         ToolError::ExecutionFailed(
-            "LIMITLESS_WALLET_ADDRESS not set — add it to ~/.ironclaw/.env and restart".to_string(),
+            "LIMITLESS_WALLET_ADDRESS not set — add it to ~/.ironclaw/.env".to_string(),
         )
     })?;
 
