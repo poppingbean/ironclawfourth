@@ -1531,33 +1531,12 @@ async fn fetch_limitless_markets_15m(
     Ok((markets, all_markets))
 }
 
-/// Returns true only for open BTC 15-minute prediction markets.
+/// Returns true only for open (non-resolved, non-closed) markets.
 ///
-/// Checks:
-/// 1. Title or slug contains "15m" / "15 min" / "15-min" (case-insensitive)
-/// 2. Market is not resolved and not closed
+/// The API endpoint `/markets/active/2` already scopes to BTC category markets,
+/// so no additional title/slug filtering is needed. We only reject markets that
+/// are explicitly marked resolved or closed.
 fn is_btc_15m_open_market(m: &serde_json::Value) -> bool {
-    // --- 15-minute filter ---
-    let title = m["title"]
-        .as_str()
-        .or_else(|| m["question"].as_str())
-        .unwrap_or("");
-    let slug = m["slug"]
-        .as_str()
-        .or_else(|| m["market_slug"].as_str())
-        .unwrap_or("");
-    let title_lc = title.to_ascii_lowercase();
-    let slug_lc = slug.to_ascii_lowercase();
-    let is_15m = title_lc.contains("15m")
-        || title_lc.contains("15 min")
-        || title_lc.contains("15-min")
-        || slug_lc.contains("15m")
-        || slug_lc.contains("15-min");
-    if !is_15m {
-        return false;
-    }
-
-    // --- Open/active filter ---
     // Reject if resolved == true
     if m["resolved"].as_bool().unwrap_or(false) {
         return false;
@@ -1579,7 +1558,6 @@ fn is_btc_15m_open_market(m: &serde_json::Value) -> bool {
             return false;
         }
     }
-
     true
 }
 

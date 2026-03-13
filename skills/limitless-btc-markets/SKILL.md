@@ -31,9 +31,8 @@ activation:
 # Limitless Exchange — BTC 15m Active Markets
 
 Call the `limitless_fetch_markets` tool. It fetches BTC markets from Limitless
-Exchange (category 2), then filters to only open, non-resolved markets whose
-title or slug contains "15m" / "15 min" / "15-min". Other markets are discarded.
-The filtered snapshot is stored to memory.
+Exchange (category 2 = BTC) and filters to only open, non-resolved markets.
+Resolved or closed markets are discarded. The snapshot is stored to memory.
 
 ```
 limitless_fetch_markets
