@@ -488,6 +488,11 @@ impl Tool for RoutineUpdateTool {
                 "description": {
                     "type": "string",
                     "description": "New description"
+                },
+                "tool_permissions": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Replace the tool_permissions list for full_job routines"
                 }
             },
             "required": ["name"]
@@ -523,6 +528,23 @@ impl Tool for RoutineUpdateTool {
             match &mut routine.action {
                 RoutineAction::Lightweight { prompt: p, .. } => *p = prompt.to_string(),
                 RoutineAction::FullJob { description: d, .. } => *d = prompt.to_string(),
+            }
+        }
+
+        if let Some(perms_arr) = params.get("tool_permissions").and_then(|v| v.as_array()) {
+            let perms: Vec<String> = perms_arr
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            match &mut routine.action {
+                RoutineAction::FullJob { tool_permissions, .. } => {
+                    *tool_permissions = perms;
+                }
+                _ => {
+                    return Err(ToolError::InvalidParameters(
+                        "tool_permissions can only be set on full_job routines".to_string(),
+                    ));
+                }
             }
         }
 

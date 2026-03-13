@@ -798,6 +798,18 @@ impl Tool for LimitlessPlaceOrdersTool {
             .await
             .ok();
 
+        // Read credentials once — needed for every order call.
+        let api_key = read_env_var("LIMITLESS_API_KEY").ok_or_else(|| {
+            ToolError::ExecutionFailed(
+                "LIMITLESS_API_KEY not set — add to ~/.ironclaw/.env".into(),
+            )
+        })?;
+        let pk_str = read_env_var("LIMITLESS_PRIVATE_KEY").ok_or_else(|| {
+            ToolError::ExecutionFailed(
+                "LIMITLESS_PRIVATE_KEY not set — add to ~/.ironclaw/.env".into(),
+            )
+        })?;
+
         let balance_result = fetch_usdc_balance_via_basescan().await;
 
         // Use yes_score/no_score diff if present; fall back to |score|.
@@ -882,25 +894,20 @@ impl Tool for LimitlessPlaceOrdersTool {
                 continue;
             }
 
-            let result = execute_limitless_order(
+            let price_arg = if order_type == "GTC" { Some(price) } else { None };
+            let result = limitless_http_place_order(
+                &api_key,
+                &pk_str,
                 slug,
                 &outcome,
-                price,
                 order_size,
                 order_type,
+                price_arg,
             )
             .await;
 
             order_results.push(match result {
-                Ok(output) => serde_json::json!({
-                    "slug": slug,
-                    "outcome": outcome,
-                    "price": price,
-                    "size_usdc": order_size,
-                    "order_type": order_type,
-                    "status": "submitted",
-                    "output": output,
-                }),
+                Ok(v) => v,
                 Err(e) => serde_json::json!({
                     "slug": slug,
                     "outcome": outcome,
@@ -997,10 +1004,10 @@ impl Tool for LimitlessPlaceOrderHttpTool {
             return Err(ToolError::InvalidParameters("price required for GTC orders".into()));
         }
 
-        let api_key = std::env::var("LIMITLESS_API_KEY")
-            .map_err(|_| ToolError::ExecutionFailed("LIMITLESS_API_KEY not set — add to ~/.ironclaw/.env and restart".into()))?;
-        let pk_str = std::env::var("LIMITLESS_PRIVATE_KEY")
-            .map_err(|_| ToolError::ExecutionFailed("LIMITLESS_PRIVATE_KEY not set — add to ~/.ironclaw/.env and restart".into()))?;
+        let api_key = read_env_var("LIMITLESS_API_KEY")
+            .ok_or_else(|| ToolError::ExecutionFailed("LIMITLESS_API_KEY not set — add to ~/.ironclaw/.env".into()))?;
+        let pk_str = read_env_var("LIMITLESS_PRIVATE_KEY")
+            .ok_or_else(|| ToolError::ExecutionFailed("LIMITLESS_PRIVATE_KEY not set — add to ~/.ironclaw/.env".into()))?;
 
         let resp = limitless_http_place_order(
             &api_key, &pk_str, slug, &outcome, size, &order_type, price_opt,
