@@ -502,37 +502,19 @@ impl Tool for LimitlessComputeSignalTool {
 
         let (long_score, short_score) = score_direction(&ta_4h, &ta_1h, &ta_15m, &ta_5m);
 
-        let any_rsi_above_80 = [ta_4h.rsi, ta_1h.rsi, ta_15m.rsi, ta_5m.rsi]
-            .iter()
-            .any(|&r| r > 80.0);
-        let any_rsi_below_20 = [ta_4h.rsi, ta_1h.rsi, ta_15m.rsi, ta_5m.rsi]
-            .iter()
-            .any(|&r| r < 20.0);
+        // net_score > 0 = bullish, < 0 = bearish (-10 to +10)
+        let net_score: i8 = long_score as i8 - short_score as i8;
+
         let bb_squeeze = ta_15m.bb_width < 0.015;
         let low_volume = ta_15m.volume_ratio < 0.4;
 
-        let (direction_str, final_score, skip_reason): (&str, u8, Option<&str>) =
-            if bb_squeeze {
-                ("SKIP", 0, Some("BB squeeze on 15m — breakout direction unknown"))
-            } else if low_volume {
-                ("SKIP", 0, Some("Volume ratio on 15m < 0.4 — no momentum"))
-            } else if any_rsi_below_20 {
-                ("LONG", long_score, None)
-            } else if any_rsi_above_80 {
-                ("SHORT", short_score, None)
-            } else if long_score >= 5 && long_score > short_score {
-                ("LONG", long_score, None)
-            } else if short_score >= 5 && short_score >= long_score {
-                ("SHORT", short_score, None)
-            } else {
-                ("SKIP", long_score.max(short_score), Some("Score < 5"))
-            };
-
-        let confidence = match final_score {
-            9..=10 => "High",
-            7..=8 => "Medium",
-            5..=6 => "Low",
-            _ => "None",
+        // Global skip overrides — unpredictable conditions
+        let global_skip_reason: Option<&str> = if bb_squeeze {
+            Some("BB squeeze on 15m — breakout direction unknown")
+        } else if low_volume {
+            Some("Volume ratio on 15m < 0.4 — no momentum")
+        } else {
+            None
         };
 
         let current_price = ta_15m.current_price;
@@ -540,15 +522,14 @@ impl Tool for LimitlessComputeSignalTool {
         let market_signals: Vec<serde_json::Value> = markets
             .iter()
             .map(|m| {
-                if direction_str == "SKIP" {
+                if let Some(reason) = global_skip_reason {
                     return serde_json::json!({
                         "market_id": m.market_id,
                         "title": m.title,
                         "slug": m.slug,
-                        "strike": null,
                         "current_price": current_price,
-                        "gap_pct": null,
-                        "recommendation": "SKIP",
+                        "decision": "SKIP",
+                        "reason": reason,
                         "yes_price": m.yes_price,
                         "no_price": m.no_price,
                         "liquidity": m.liquidity,
@@ -560,27 +541,9 @@ impl Tool for LimitlessComputeSignalTool {
                         "market_id": m.market_id,
                         "title": m.title,
                         "slug": m.slug,
-                        "strike": null,
                         "current_price": current_price,
-                        "gap_pct": null,
-                        "recommendation": "SKIP",
-                        "skip_reason": "liquidity < $500",
-                        "yes_price": m.yes_price,
-                        "no_price": m.no_price,
-                        "liquidity": m.liquidity,
-                    });
-                }
-
-                if m.yes_price > 0.45 && m.yes_price < 0.55 && final_score < 7 {
-                    return serde_json::json!({
-                        "market_id": m.market_id,
-                        "title": m.title,
-                        "slug": m.slug,
-                        "strike": null,
-                        "current_price": current_price,
-                        "gap_pct": null,
-                        "recommendation": "SKIP",
-                        "skip_reason": "YES price in 0.45-0.55 range and score < 7",
+                        "decision": "SKIP",
+                        "reason": "liquidity < $500",
                         "yes_price": m.yes_price,
                         "no_price": m.no_price,
                         "liquidity": m.liquidity,
@@ -594,14 +557,35 @@ impl Tool for LimitlessComputeSignalTool {
                     0.0
                 };
 
-                // Neutral zone (within 0.3%): skip if score is borderline
-                let rec = if gap_pct.abs() < 0.3 && final_score <= 5 {
-                    "SKIP"
-                } else if direction_str == "LONG" {
-                    "YES"
+                // Per-market decision: will price close ABOVE (YES) or BELOW (NO) strike?
+                //
+                // Logic combines:
+                //   gap_pct  = how far current price is from strike (+ = above, - = below)
+                //   net_score = TA momentum (+ = bullish, - = bearish)
+                //
+                // If price is already comfortably above strike (>1%), only strongly bearish
+                // TA overrides YES. If price is below strike (<-1%), only strongly bullish
+                // TA can produce YES.
+                let decision = if gap_pct > 1.0 {
+                    // Comfortably above — stays YES unless strongly bearish
+                    if net_score <= -4 { "NO" } else { "YES" }
+                } else if gap_pct < -1.0 {
+                    // Comfortably below — stays NO unless strongly bullish
+                    if net_score >= 4 { "YES" } else { "NO" }
+                } else if gap_pct > 0.0 {
+                    // Slightly above strike — neutral/bullish → YES, bearish → NO
+                    if net_score >= -2 { "YES" } else { "NO" }
+                } else if gap_pct < 0.0 {
+                    // Slightly below strike — needs bullish push to cross
+                    if net_score >= 2 { "YES" } else { "NO" }
                 } else {
-                    "NO"
+                    // Exactly at strike — skip (50/50)
+                    "SKIP"
                 };
+
+                let reason = format!(
+                    "gap={gap_pct:+.2}% net_score={net_score:+} (bull={long_score} bear={short_score})"
+                );
 
                 serde_json::json!({
                     "market_id": m.market_id,
@@ -610,7 +594,8 @@ impl Tool for LimitlessComputeSignalTool {
                     "strike": strike,
                     "current_price": current_price,
                     "gap_pct": gap_pct,
-                    "recommendation": rec,
+                    "decision": decision,
+                    "reason": reason,
                     "yes_price": m.yes_price,
                     "no_price": m.no_price,
                     "liquidity": m.liquidity,
@@ -619,13 +604,11 @@ impl Tool for LimitlessComputeSignalTool {
             .collect();
 
         let signal = serde_json::json!({
-            "fetched_at": now.to_rfc3339(),
-            "direction": direction_str,
-            "score": final_score,
-            "long_score": long_score,
-            "short_score": short_score,
-            "confidence": confidence,
-            "skip_reason": skip_reason,
+            "computed_at": now.to_rfc3339(),
+            "btc_price_15m": current_price,
+            "score": net_score,
+            "yes_score": long_score,
+            "no_score": short_score,
             "markets": market_signals,
         });
 

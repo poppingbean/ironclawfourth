@@ -1,7 +1,7 @@
 ---
 name: limitless-btc-order
-version: 0.2.0
-description: "Read the YES/NO signal from memory and place orders on Limitless Exchange via the built-in order tool. Requires limitless on PATH with credentials configured."
+version: 0.3.0
+description: "Read the YES/NO signal from memory and place orders on Limitless Exchange via direct HTTP API (EIP-712 signed, no CLI required)."
 activation:
   keywords:
     - place order limitless
@@ -31,42 +31,51 @@ activation:
 # Limitless BTC 15m — Order Execution
 
 Call the `limitless_place_orders` tool. It reads the signal from memory,
-fetches live USDC balance, calculates order size (10% of balance), and places
-orders via `limitless`.
+fetches live USDC balance via BaseScan, calculates order size, and places
+orders via direct HTTP API with EIP-712 signing (no CLI required).
 
 ```
 limitless_place_orders
 ```
 
-To test without placing real orders, use `dry_run`:
+To test without placing real orders:
 
 ```
 limitless_place_orders dry_run=true
 ```
 
-## Prerequisites
+## What the tool does
 
-`limitless/btc-15m/signal` must have been written recently (signal must be
-< 10 min old). If the tool errors with a stale-signal message, run the upstream
-signal step first.
+1. Reads `limitless/btc-15m/signal` — aborts if older than 10 minutes
+2. Filters markets to those with `decision = YES` or `decision = NO`
+3. Fetches live USDC balance from BaseScan (on-chain)
+4. Calculates order size: 10% of balance (strong conviction) or 3% (weak: `|yes_score - no_score| ≤ 2`)
+5. Fallback if BaseScan unavailable: $6.00 (strong) or $2.00 (weak)
+6. Signs and submits each order via `POST /orders` with EIP-712
 
 ## Guards enforced by the tool
 
-- Signal score < 5 → skipped automatically
 - Signal older than 10 minutes → aborts
+- On-chain USDC balance = 0 → aborts
 - Order size < $1.00 → aborts
-- Total exposure > $50 without prior approval → blocked (ask IronClaw
-  _"Approve Limitless orders above $50"_ once to pre-authorize)
+- Total exposure > $50 without prior approval → blocked
 - Market liquidity < 3× order size → that market skipped
 
-## Scheduled routine
+## Credentials required (in `~/.ironclaw/.env`)
 
-To run automatically every 15 minutes at T+8 minutes, create the routine once:
+```
+LIMITLESS_API_KEY=...
+LIMITLESS_PRIVATE_KEY=0x...
+LIMITLESS_WALLET_ADDRESS=0x...
+BASESCAN_API_KEY=...
+```
+
+## Scheduled routine
 
 ```
 routine_create:
   name: "limitless-order-15m"
-  description: "Read YES/NO signal from memory, fetch live USDC balance, place orders on Limitless Exchange via limitless."
+  description: "Read YES/NO signal from memory, fetch live USDC balance, place orders on Limitless Exchange via HTTP API."
   trigger_type: "cron"
   schedule: "0 5,20,35,50 * * * *"
   action_type: "full_job"
@@ -74,16 +83,14 @@ routine_create:
   tool_permissions:
     - limitless_place_orders
   prompt: |
-    Call limitless_place_orders immediately. Do not search for tools, check
-    secrets, or verify credentials first — the tool handles all of that
-    internally via the limitless binary on PATH. If the tool returns
-    "skipped", output only: "skipped". Otherwise output exactly: "done".
+    Call limitless_place_orders immediately. If the tool returns "skipped",
+    output only: "skipped". Otherwise output exactly: "done".
 ```
 
 ## Full timing chain
 
 ```
-:00:15  limitless-markets-15m      → limitless/btc-15m/snapshot
-:02:00  limitless-signal-15m   → candles/btc/{5m,15m,1h} + limitless/btc-15m/signal
-:05:00  limitless-order-15m        → orders placed          ← this step
+:00:15  limitless-markets-15m  → limitless/btc-15m/snapshot
+:02:00  limitless-signal-15m   → ta/btc/{5m,15m,1h,4h} + limitless/btc-15m/signal
+:05:00  limitless-order-15m    → orders placed  ← this step
 ```
