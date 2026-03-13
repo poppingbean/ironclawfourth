@@ -757,27 +757,32 @@ impl Tool for LimitlessPlaceOrdersTool {
         }
 
         let score = signal["score"].as_i64().unwrap_or(0);
-        let direction = signal["direction"].as_str().unwrap_or("SKIP");
 
-        if score.unsigned_abs() < 5 || direction == "SKIP" {
-            return Ok(ToolOutput::success(
-                serde_json::json!({
-                    "status": "skipped",
-                    "reason": signal["skip_reason"].as_str().unwrap_or("Score < 5 or no direction"),
-                    "score": score.unsigned_abs(),
-                }),
-                start.elapsed(),
-            ));
-        }
+        // Load snapshot to get per-market slug, prices, and liquidity.
+        // The LLM signal only has market_id + decision; metadata lives in snapshot.
+        let snapshot_doc = self.workspace.read("limitless/btc-15m/snapshot").await.ok();
+        let snapshot_markets: std::collections::HashMap<String, serde_json::Value> =
+            snapshot_doc
+                .as_ref()
+                .and_then(|doc| serde_json::from_str::<serde_json::Value>(&doc.content).ok())
+                .and_then(|v| v["markets"].as_array().cloned())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|m| {
+                    let id = m["market_id"].as_str()?.to_string();
+                    Some((id, m))
+                })
+                .collect();
 
+        // Filter to markets where the LLM decided YES or NO (not SKIP).
         let actionable: Vec<serde_json::Value> = signal["markets"]
             .as_array()
             .cloned()
             .unwrap_or_default()
             .into_iter()
             .filter(|m| {
-                let rec = m["recommendation"].as_str().unwrap_or("");
-                rec == "YES" || rec == "NO"
+                let dec = m["decision"].as_str().unwrap_or("");
+                dec == "YES" || dec == "NO"
             })
             .collect();
 
@@ -861,12 +866,20 @@ impl Tool for LimitlessPlaceOrdersTool {
         let mut order_results: Vec<serde_json::Value> = Vec::new();
 
         for market in &actionable {
-            let slug = market["slug"].as_str().unwrap_or("");
-            let rec = market["recommendation"].as_str().unwrap_or("");
-            let outcome = rec.to_lowercase();
-            let liquidity = market["liquidity"].as_f64().unwrap_or(0.0);
+            let market_id = market["market_id"].as_str().unwrap_or("");
+            let decision = market["decision"].as_str().unwrap_or("SKIP");
+            let outcome = decision.to_lowercase();
 
-            if liquidity < order_size * 3.0 {
+            // Look up metadata from snapshot (slug, prices, liquidity)
+            let meta = snapshot_markets.get(market_id);
+            let slug = meta
+                .and_then(|m| m["slug"].as_str())
+                .unwrap_or(market_id);
+            let liquidity = meta
+                .and_then(|m| m["liquidity"].as_f64())
+                .unwrap_or(0.0);
+
+            if liquidity > 0.0 && liquidity < order_size * 3.0 {
                 order_results.push(serde_json::json!({
                     "slug": slug,
                     "status": "skipped",
@@ -875,12 +888,13 @@ impl Tool for LimitlessPlaceOrdersTool {
                 continue;
             }
 
-            let price = if rec == "YES" {
-                market["yes_price"].as_f64().unwrap_or(0.5)
+            let price = if decision == "YES" {
+                meta.and_then(|m| m["yes_price"].as_f64()).unwrap_or(0.5)
             } else {
-                market["no_price"].as_f64().unwrap_or(0.5)
+                meta.and_then(|m| m["no_price"].as_f64()).unwrap_or(0.5)
             };
-            let order_type = if score >= 9 { "FOK" } else { "GTC" };
+            // Use FOK for strong conviction (high score), GTC otherwise
+            let order_type = if score.unsigned_abs() >= 8 { "FOK" } else { "GTC" };
 
             if dry_run {
                 order_results.push(serde_json::json!({
@@ -923,7 +937,8 @@ impl Tool for LimitlessPlaceOrdersTool {
         let result = serde_json::json!({
             "executed_at": now.to_rfc3339(),
             "signal_score": score,
-            "direction": direction,
+            "yes_score": signal["yes_score"],
+            "no_score": signal["no_score"],
             "balance_source": balance_source,
             "order_size_usdc": order_size,
             "dry_run": dry_run,
