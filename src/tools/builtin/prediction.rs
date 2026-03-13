@@ -798,24 +798,37 @@ impl Tool for LimitlessPlaceOrdersTool {
             .await
             .ok();
 
-        let available_balance = fetch_usdc_balance_via_basescan().await?;
-
-        if available_balance <= 0.0 {
-            return Err(ToolError::ExecutionFailed(format!(
-                "USDC balance is {available_balance:.2}. Fund your account before placing orders."
-            )));
-        }
+        let balance_result = fetch_usdc_balance_via_basescan().await;
 
         // Use yes_score/no_score diff if present; fall back to |score|.
         let yes_score = signal["yes_score"].as_i64().unwrap_or(score.max(0));
         let no_score = signal["no_score"].as_i64().unwrap_or((-score).max(0));
         let conviction_diff = (yes_score - no_score).abs();
-        let size_pct = if conviction_diff <= 2 { 0.03 } else { 0.10 };
-        let order_size = (available_balance * size_pct * 100.0).floor() / 100.0;
+        let weak_conviction = conviction_diff <= 2;
+
+        let (order_size, balance_source) = match balance_result {
+            Ok(bal) if bal > 0.0 => {
+                let size_pct = if weak_conviction { 0.03 } else { 0.10 };
+                let sz = (bal * size_pct * 100.0).floor() / 100.0;
+                (sz, format!("BaseScan (${bal:.2})"))
+            }
+            Ok(_) => {
+                return Err(ToolError::ExecutionFailed(
+                    "On-chain USDC balance is zero. Fund your account before placing orders."
+                        .to_string(),
+                ));
+            }
+            Err(e) => {
+                // Fallback fixed amounts: 10% tier = $6, 3% tier = $2
+                let sz = if weak_conviction { 2.0_f64 } else { 6.0_f64 };
+                tracing::warn!("BaseScan balance fetch failed ({e}), using fallback ${sz:.2}");
+                (sz, format!("fallback (BaseScan unavailable: {e})"))
+            }
+        };
+
         if order_size < 1.0 {
             return Err(ToolError::ExecutionFailed(format!(
-                "Insufficient funds: order size {order_size:.2} < $1.00 minimum. \
-                 Available: ${available_balance:.2}"
+                "Order size ${order_size:.2} < $1.00 minimum. Balance source: {balance_source}"
             )));
         }
 
@@ -904,7 +917,7 @@ impl Tool for LimitlessPlaceOrdersTool {
             "executed_at": now.to_rfc3339(),
             "signal_score": score,
             "direction": direction,
-            "available_balance_usdc": available_balance,
+            "balance_source": balance_source,
             "order_size_usdc": order_size,
             "dry_run": dry_run,
             "orders": order_results,
