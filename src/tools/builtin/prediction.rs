@@ -1420,16 +1420,42 @@ fn parse_strike_from_title(title: &str) -> Option<f64> {
         .and_then(|s| s.trim_end_matches('.').parse::<f64>().ok())
 }
 
+/// Read an env var from the process environment, falling back to
+/// `~/.ironclaw/.env` if not present. This lets the tool pick up vars
+/// that were added to `.env` after the process started.
+fn read_env_var(key: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(key) {
+        return Some(v);
+    }
+    // Fall back: read ~/.ironclaw/.env directly
+    let env_path = crate::bootstrap::ironclaw_env_path();
+    if env_path.exists() {
+        if let Ok(iter) = dotenvy::from_path_iter(&env_path) {
+            for item in iter.flatten() {
+                if item.0 == key {
+                    return Some(item.1);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Fetch USDC balance from BaseScan (Base network on-chain balance).
 ///
-/// Reads `BASESCAN_API_KEY` and `LIMITLESS_WALLET_ADDRESS` from environment.
+/// Reads `BASESCAN_API_KEY` and `LIMITLESS_WALLET_ADDRESS` from process env
+/// or `~/.ironclaw/.env` (no restart needed after adding the vars).
 /// USDC contract on Base: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 (6 decimals).
 async fn fetch_usdc_balance_via_basescan() -> Result<f64, ToolError> {
-    let api_key = std::env::var("BASESCAN_API_KEY").map_err(|_| {
-        ToolError::ExecutionFailed("BASESCAN_API_KEY env var not set".to_string())
+    let api_key = read_env_var("BASESCAN_API_KEY").ok_or_else(|| {
+        ToolError::ExecutionFailed(
+            "BASESCAN_API_KEY not found in process env or ~/.ironclaw/.env".to_string(),
+        )
     })?;
-    let wallet = std::env::var("LIMITLESS_WALLET_ADDRESS").map_err(|_| {
-        ToolError::ExecutionFailed("LIMITLESS_WALLET_ADDRESS env var not set".to_string())
+    let wallet = read_env_var("LIMITLESS_WALLET_ADDRESS").ok_or_else(|| {
+        ToolError::ExecutionFailed(
+            "LIMITLESS_WALLET_ADDRESS not found in process env or ~/.ironclaw/.env".to_string(),
+        )
     })?;
 
     const USDC_BASE: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -1474,6 +1500,12 @@ async fn fetch_usdc_balance_via_basescan() -> Result<f64, ToolError> {
 async fn fetch_usdc_balance_via_cli() -> Result<f64, ToolError> {
     let mut cmd = tokio::process::Command::new("limitless");
     cmd.args(["portfolio", "allowance", "-o", "json"]);
+    if let Some(k) = read_env_var("LIMITLESS_API_KEY") {
+        cmd.env("LIMITLESS_API_KEY", k);
+    }
+    if let Some(k) = read_env_var("LIMITLESS_PRIVATE_KEY") {
+        cmd.env("LIMITLESS_PRIVATE_KEY", k);
+    }
     cmd.kill_on_drop(true);
 
     let output = tokio::time::timeout(Duration::from_secs(30), cmd.output())
@@ -1536,7 +1568,15 @@ async fn execute_limitless_order(
         cmd.args(["--price", &format!("{price:.4}")]);
     }
 
-    // limitless-cli reads credentials from its own config; do not inject IronClaw env vars.
+    // Inject credentials into the child process env, reading from process env
+    // or ~/.ironclaw/.env directly so no bot restart is required.
+    if let Some(api_key) = read_env_var("LIMITLESS_API_KEY") {
+        cmd.env("LIMITLESS_API_KEY", api_key);
+    }
+    if let Some(private_key) = read_env_var("LIMITLESS_PRIVATE_KEY") {
+        cmd.env("LIMITLESS_PRIVATE_KEY", private_key);
+    }
+
     cmd.kill_on_drop(true);
 
     let output = tokio::time::timeout(Duration::from_secs(30), cmd.output())
