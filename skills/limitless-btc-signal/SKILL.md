@@ -113,7 +113,7 @@ For each market in `limitless/btc-15m/snapshot`:
 4. Calculate USDC quantity:
    - If `|yes_score - no_score| <= 2` (weak conviction) → Base size = 3% of available USDC balance.
    - Otherwise (strong conviction) → Base size = 10% of available USDC balance.
-   - Use $10 as default if balance is unknown.
+   - If BaseScan cannot fetch the wallet balance, use fixed fallbacks: **$2.00** (weak conviction) or **$6.00** (strong conviction).
    - Scale by conviction: score ≥ 6 → 100%, score 4-5 → 75%, score 3 → 50%.
    - Minimum $1.00; if below, SKIP the market.
    - Maximum $50.00 per market without prior approval.
