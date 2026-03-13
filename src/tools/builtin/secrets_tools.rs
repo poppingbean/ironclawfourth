@@ -69,13 +69,33 @@ impl Tool for SecretListTool {
                 serde_json::json!({
                     "name": r.name,
                     "provider": r.provider,
+                    "source": "store",
                 })
             })
             .collect();
 
-        let count = secrets.len();
+        // Also surface credential-like env vars loaded from ~/.ironclaw/.env at
+        // startup. We report name + source only — never the values.
+        let credential_suffixes = [
+            "_API_KEY", "_SECRET_KEY", "_PRIVATE_KEY", "_TOKEN", "_SECRET",
+            "_WALLET_ADDRESS", "_WALLET",
+        ];
+        let mut env_creds: Vec<serde_json::Value> = std::env::vars()
+            .filter(|(k, v)| {
+                !v.is_empty()
+                    && credential_suffixes.iter().any(|suffix| k.ends_with(suffix))
+            })
+            .map(|(k, _)| serde_json::json!({ "name": k, "source": "env" }))
+            .collect();
+        env_creds.sort_by(|a, b| {
+            a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+        });
+
+        let mut all = secrets;
+        all.extend(env_creds);
+        let count = all.len();
         let output = serde_json::json!({
-            "secrets": secrets,
+            "secrets": all,
             "count": count,
         });
 

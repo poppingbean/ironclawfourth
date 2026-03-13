@@ -997,10 +997,10 @@ impl Tool for LimitlessPlaceOrderHttpTool {
             return Err(ToolError::InvalidParameters("price required for GTC orders".into()));
         }
 
-        let api_key = read_env_var("LIMITLESS_API_KEY")
-            .ok_or_else(|| ToolError::ExecutionFailed("LIMITLESS_API_KEY not set".into()))?;
-        let pk_str = read_env_var("LIMITLESS_PRIVATE_KEY")
-            .ok_or_else(|| ToolError::ExecutionFailed("LIMITLESS_PRIVATE_KEY not set".into()))?;
+        let api_key = std::env::var("LIMITLESS_API_KEY")
+            .map_err(|_| ToolError::ExecutionFailed("LIMITLESS_API_KEY not set — add to ~/.ironclaw/.env and restart".into()))?;
+        let pk_str = std::env::var("LIMITLESS_PRIVATE_KEY")
+            .map_err(|_| ToolError::ExecutionFailed("LIMITLESS_PRIVATE_KEY not set — add to ~/.ironclaw/.env and restart".into()))?;
 
         let resp = limitless_http_place_order(
             &api_key, &pk_str, slug, &outcome, size, &order_type, price_opt,
@@ -1287,7 +1287,7 @@ impl Tool for LimitlessBaseScanBalanceTool {
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let wallet = read_env_var("LIMITLESS_WALLET_ADDRESS").unwrap_or_else(|| "unknown".into());
+        let wallet = std::env::var("LIMITLESS_WALLET_ADDRESS").unwrap_or_else(|_| "unknown".into());
         let balance = fetch_usdc_balance_via_basescan().await?;
         Ok(ToolOutput::success(
             serde_json::json!({
@@ -1305,10 +1305,10 @@ async fn run_limitless_cli_json(args: &[&str]) -> Result<serde_json::Value, Stri
     let mut cmd = tokio::process::Command::new("limitless");
     cmd.args(args);
     cmd.args(["-o", "json"]);
-    if let Some(k) = read_env_var("LIMITLESS_API_KEY") {
+    if let Ok(k) = std::env::var("LIMITLESS_API_KEY") {
         cmd.env("LIMITLESS_API_KEY", k);
     }
-    if let Some(k) = read_env_var("LIMITLESS_PRIVATE_KEY") {
+    if let Ok(k) = std::env::var("LIMITLESS_PRIVATE_KEY") {
         cmd.env("LIMITLESS_PRIVATE_KEY", k);
     }
     cmd.kill_on_drop(true);
@@ -1738,41 +1738,21 @@ fn parse_strike_from_title(title: &str) -> Option<f64> {
         .and_then(|s| s.trim_end_matches('.').parse::<f64>().ok())
 }
 
-/// Read an env var from the process environment, falling back to
-/// `~/.ironclaw/.env` if not present. This lets the tool pick up vars
-/// that were added to `.env` after the process started.
-fn read_env_var(key: &str) -> Option<String> {
-    if let Ok(v) = std::env::var(key) {
-        return Some(v);
-    }
-    // Fall back: read ~/.ironclaw/.env directly
-    let env_path = crate::bootstrap::ironclaw_env_path();
-    if env_path.exists() {
-        if let Ok(iter) = dotenvy::from_path_iter(&env_path) {
-            for item in iter.flatten() {
-                if item.0 == key {
-                    return Some(item.1);
-                }
-            }
-        }
-    }
-    None
-}
 
 /// Fetch USDC balance from BaseScan (Base network on-chain balance).
 ///
 /// Reads `BASESCAN_API_KEY` and `LIMITLESS_WALLET_ADDRESS` from process env
-/// or `~/.ironclaw/.env` (no restart needed after adding the vars).
+/// (loaded at startup from `~/.ironclaw/.env` by bootstrap).
 /// USDC contract on Base: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 (6 decimals).
 async fn fetch_usdc_balance_via_basescan() -> Result<f64, ToolError> {
-    let api_key = read_env_var("BASESCAN_API_KEY").ok_or_else(|| {
+    let api_key = std::env::var("BASESCAN_API_KEY").map_err(|_| {
         ToolError::ExecutionFailed(
-            "BASESCAN_API_KEY not found in process env or ~/.ironclaw/.env".to_string(),
+            "BASESCAN_API_KEY not set — add it to ~/.ironclaw/.env and restart".to_string(),
         )
     })?;
-    let wallet = read_env_var("LIMITLESS_WALLET_ADDRESS").ok_or_else(|| {
+    let wallet = std::env::var("LIMITLESS_WALLET_ADDRESS").map_err(|_| {
         ToolError::ExecutionFailed(
-            "LIMITLESS_WALLET_ADDRESS not found in process env or ~/.ironclaw/.env".to_string(),
+            "LIMITLESS_WALLET_ADDRESS not set — add it to ~/.ironclaw/.env and restart".to_string(),
         )
     })?;
 
@@ -1836,12 +1816,11 @@ async fn execute_limitless_order(
         cmd.args(["--price", &format!("{price:.4}")]);
     }
 
-    // Inject credentials into the child process env, reading from process env
-    // or ~/.ironclaw/.env directly so no bot restart is required.
-    if let Some(api_key) = read_env_var("LIMITLESS_API_KEY") {
+    // Inject credentials into the child process env (loaded at startup by bootstrap).
+    if let Ok(api_key) = std::env::var("LIMITLESS_API_KEY") {
         cmd.env("LIMITLESS_API_KEY", api_key);
     }
-    if let Some(private_key) = read_env_var("LIMITLESS_PRIVATE_KEY") {
+    if let Ok(private_key) = std::env::var("LIMITLESS_PRIVATE_KEY") {
         cmd.env("LIMITLESS_PRIVATE_KEY", private_key);
     }
 
