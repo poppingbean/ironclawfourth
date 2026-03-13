@@ -536,20 +536,6 @@ impl Tool for LimitlessComputeSignalTool {
                     });
                 }
 
-                if m.liquidity < 500.0 {
-                    return serde_json::json!({
-                        "market_id": m.market_id,
-                        "title": m.title,
-                        "slug": m.slug,
-                        "current_price": current_price,
-                        "decision": "SKIP",
-                        "reason": "liquidity < $500",
-                        "yes_price": m.yes_price,
-                        "no_price": m.no_price,
-                        "liquidity": m.liquidity,
-                    });
-                }
-
                 let strike = parse_strike_from_title(&m.title).unwrap_or(0.0);
                 let gap_pct = if strike > 0.0 {
                     (current_price - strike) / strike * 100.0
@@ -862,22 +848,14 @@ impl Tool for LimitlessPlaceOrdersTool {
                 .and_then(|m| m["liquidity"].as_f64())
                 .unwrap_or(0.0);
 
-            if liquidity > 0.0 && liquidity < order_size * 3.0 {
-                order_results.push(serde_json::json!({
-                    "slug": slug,
-                    "status": "skipped",
-                    "reason": format!("Liquidity ${liquidity:.0} < 3× order size ${order_size:.2}"),
-                }));
-                continue;
-            }
-
             let price = if decision == "YES" {
                 meta.and_then(|m| m["yes_price"].as_f64()).unwrap_or(0.5)
             } else {
                 meta.and_then(|m| m["no_price"].as_f64()).unwrap_or(0.5)
             };
-            // Use FOK for strong conviction (high score), GTC otherwise
-            let order_type = if score.unsigned_abs() >= 8 { "FOK" } else { "GTC" };
+            // If liquidity is zero, use GTC (limit order — fills when liquidity appears).
+            // Otherwise: |score| >= 7 → FOK (strong conviction), < 7 → GTC (limit order).
+            let order_type = if liquidity == 0.0 || score.unsigned_abs() < 7 { "GTC" } else { "FOK" };
 
             if dry_run {
                 order_results.push(serde_json::json!({
@@ -1484,7 +1462,7 @@ async fn fetch_limitless_markets_15m(
     client: &reqwest::Client,
 ) -> Result<(Vec<MarketEntry>, Vec<serde_json::Value>), ToolError> {
     let resp = client
-        .get("https://api.limitless.exchange/markets/active/2?limit=10&page=1")
+        .get("https://api.limitless.exchange/markets/active/2")
         .send()
         .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Limitless request failed: {e}")))?;
@@ -1531,34 +1509,40 @@ async fn fetch_limitless_markets_15m(
     Ok((markets, all_markets))
 }
 
-/// Returns true only for open (non-resolved, non-closed) markets.
+/// Post-fetch filter: keep only open BTC 15-minute markets.
 ///
-/// The API endpoint `/markets/active/2` already scopes to BTC category markets,
-/// so no additional title/slug filtering is needed. We only reject markets that
-/// are explicitly marked resolved or closed.
+/// Category=2 is "Crypto" (not BTC-only), so after fetching all active crypto
+/// markets we apply three checks:
+/// 1. Not resolved (still open for trading)
+/// 2. Title/question contains "BTC" or "Bitcoin"
+/// 3. `categories` array contains "15 min" or "15m"
 fn is_btc_15m_open_market(m: &serde_json::Value) -> bool {
-    // Reject if resolved == true
+    // 1. Reject resolved/settled markets.
     if m["resolved"].as_bool().unwrap_or(false) {
         return false;
     }
-    // Reject if closed == true
-    if m["closed"].as_bool().unwrap_or(false) {
+
+    // 2. Must be a BTC market.
+    let text = m["title"]
+        .as_str()
+        .or_else(|| m["question"].as_str())
+        .unwrap_or("");
+    let lc = text.to_ascii_lowercase();
+    if !lc.contains("btc") && !lc.contains("bitcoin") {
         return false;
     }
-    // Reject if active == false (when the field is present)
-    if let Some(active) = m["active"].as_bool() {
-        if !active {
-            return false;
-        }
-    }
-    // Reject if status field is set and not "active" / "open"
-    if let Some(status) = m["status"].as_str() {
-        let s = status.to_ascii_lowercase();
-        if s != "active" && s != "open" {
-            return false;
-        }
-    }
-    true
+
+    // 3. Must be a 15-minute market — determined by the `categories` array
+    //    which contains "15 min" for 15m markets (e.g. ["Crypto", "15 min", "ypp"]).
+    m["categories"]
+        .as_array()
+        .map(|cats| {
+            cats.iter().any(|c| {
+                let s = c.as_str().unwrap_or("").to_ascii_lowercase();
+                s.contains("15 min") || s.contains("15m")
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn parse_market_entry(m: &serde_json::Value) -> Option<MarketEntry> {
