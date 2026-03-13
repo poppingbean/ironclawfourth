@@ -936,6 +936,274 @@ impl Tool for LimitlessPlaceOrdersTool {
 
 // ── Tool 5: limitless_check_balance ───────────────────────────────────────────
 
+/// Place a single order on Limitless Exchange via direct HTTP (no CLI).
+///
+/// Reads LIMITLESS_API_KEY, LIMITLESS_PRIVATE_KEY from process env or ~/.ironclaw/.env.
+/// Signs the order with EIP-712 (alloy) and POSTs to https://api.limitless.exchange/orders.
+pub struct LimitlessPlaceOrderHttpTool;
+
+impl LimitlessPlaceOrderHttpTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl Tool for LimitlessPlaceOrderHttpTool {
+    fn name(&self) -> &str {
+        "limitless_place_order_http"
+    }
+
+    fn description(&self) -> &str {
+        "Place a single order on Limitless Exchange via direct HTTP API (no CLI required). \
+         Signs EIP-712 order with private key and POSTs to the Limitless API. \
+         Parameters: slug (market slug), outcome (yes/no), size (USDC to spend), \
+         order_type (FOK or GTC, default FOK), price (required for GTC, 0.01–0.99). \
+         Reads LIMITLESS_API_KEY and LIMITLESS_PRIVATE_KEY from env or ~/.ironclaw/.env."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "slug":       { "type": "string", "description": "Market slug" },
+                "outcome":    { "type": "string", "enum": ["yes", "no"] },
+                "size":       { "type": "number", "description": "USDC to spend (FOK) or shares (GTC)" },
+                "order_type": { "type": "string", "enum": ["FOK", "GTC"], "default": "FOK" },
+                "price":      { "type": "number", "description": "Price 0.01–0.99, required for GTC" }
+            },
+            "required": ["slug", "outcome", "size"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let slug = params["slug"].as_str()
+            .ok_or_else(|| ToolError::InvalidParameters("slug required".into()))?;
+        let outcome = params["outcome"].as_str()
+            .ok_or_else(|| ToolError::InvalidParameters("outcome required (yes/no)".into()))?
+            .to_lowercase();
+        let size = params["size"].as_f64()
+            .ok_or_else(|| ToolError::InvalidParameters("size required".into()))?;
+        let order_type = params["order_type"].as_str().unwrap_or("FOK").to_uppercase();
+        let price_opt = params["price"].as_f64();
+
+        if order_type == "GTC" && price_opt.is_none() {
+            return Err(ToolError::InvalidParameters("price required for GTC orders".into()));
+        }
+
+        let api_key = read_env_var("LIMITLESS_API_KEY")
+            .ok_or_else(|| ToolError::ExecutionFailed("LIMITLESS_API_KEY not set".into()))?;
+        let pk_str = read_env_var("LIMITLESS_PRIVATE_KEY")
+            .ok_or_else(|| ToolError::ExecutionFailed("LIMITLESS_PRIVATE_KEY not set".into()))?;
+
+        let resp = limitless_http_place_order(
+            &api_key, &pk_str, slug, &outcome, size, &order_type, price_opt,
+        ).await?;
+
+        Ok(ToolOutput::success(resp, start.elapsed()))
+    }
+}
+
+/// Full EIP-712 signed order via direct HTTP — no CLI dependency.
+async fn limitless_http_place_order(
+    api_key: &str,
+    pk_hex: &str,
+    slug: &str,
+    outcome: &str, // "yes" or "no"
+    size: f64,
+    order_type: &str, // "FOK" or "GTC"
+    price: Option<f64>,
+) -> Result<serde_json::Value, ToolError> {
+    use alloy::primitives::{Address, U256};
+    use alloy::signers::local::PrivateKeySigner;
+    use alloy::signers::Signer;
+    use alloy::sol;
+    use alloy::sol_types::SolStruct;
+
+    const BASE_URL: &str = "https://api.limitless.exchange";
+    const CHAIN_ID: u64 = 8453; // Base
+
+    sol! {
+        #[derive(Debug)]
+        struct Order {
+            uint256 salt;
+            address maker;
+            address signer;
+            address taker;
+            uint256 tokenId;
+            uint256 makerAmount;
+            uint256 takerAmount;
+            uint256 expiration;
+            uint256 nonce;
+            uint256 feeRateBps;
+            uint8 side;
+            uint8 signatureType;
+        }
+    }
+
+    let err = |s: String| ToolError::ExecutionFailed(s);
+
+    // Build HTTP client with API key header
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "X-API-Key",
+        reqwest::header::HeaderValue::from_str(api_key)
+            .map_err(|e| err(format!("Invalid API key: {e}")))?,
+    );
+    let http = reqwest::Client::builder()
+        .default_headers(headers)
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| err(format!("HTTP client: {e}")))?;
+
+    // Derive signer and maker address from private key
+    let pk_bytes = hex::decode(pk_hex.trim_start_matches("0x"))
+        .map_err(|e| err(format!("Invalid private key hex: {e}")))?;
+    let signer = PrivateKeySigner::from_slice(&pk_bytes)
+        .map_err(|e| err(format!("Invalid private key: {e}")))?;
+    let maker: Address = signer.address();
+    let maker_hex = format!("{maker:#x}");
+
+    // Fetch profile → ownerId + feeRateBps
+    let profile: serde_json::Value = http
+        .get(format!("{BASE_URL}/profiles/public/{maker_hex}"))
+        .send().await.map_err(|e| err(format!("Profile request failed: {e}")))?
+        .json().await.map_err(|e| err(format!("Profile parse failed: {e}")))?;
+    let owner_id = profile["id"].as_u64()
+        .ok_or_else(|| err(format!("Profile missing id: {profile}")))?;
+    let fee_rate_bps: u64 = profile["rank"]["feeRateBps"].as_u64().unwrap_or(300);
+
+    // Fetch market → venue.exchange + tokens.yes/no
+    let market: serde_json::Value = http
+        .get(format!("{BASE_URL}/markets/{slug}"))
+        .send().await.map_err(|e| err(format!("Market request failed: {e}")))?
+        .json().await.map_err(|e| err(format!("Market parse failed: {e}")))?;
+    let exchange_str = market["venue"]["exchange"].as_str()
+        .ok_or_else(|| err(format!("Market missing venue.exchange: {market}")))?;
+    let token_id_str = if outcome == "yes" {
+        market["tokens"]["yes"].as_str()
+    } else {
+        market["tokens"]["no"].as_str()
+    }.ok_or_else(|| err(format!("Market missing token id for outcome={outcome}")))?;
+
+    let venue_exchange: Address = exchange_str.parse()
+        .map_err(|e| err(format!("Invalid exchange address {exchange_str}: {e}")))?;
+    let token_id = U256::from_str_radix(token_id_str, 10)
+        .map_err(|e| err(format!("Invalid tokenId {token_id_str}: {e}")))?;
+    let zero_addr: Address = "0x0000000000000000000000000000000000000000".parse().unwrap();
+
+    // Generate random salt (JS-safe integer range)
+    let salt_val = {
+        let mut buf = [0u8; 8];
+        use rand::RngCore;
+        rand::thread_rng().fill_bytes(&mut buf);
+        let v = u64::from_be_bytes(buf) & ((1u64 << 53) - 1);
+        U256::from(v)
+    };
+
+    // Build order struct
+    let scale = 1_000_000u64; // 1e6 micro-USDC
+    let (maker_amount, taker_amount, order_price_field) = if order_type == "FOK" {
+        let ma = U256::from((size * scale as f64) as u128);
+        (ma, U256::from(1u64), None)
+    } else {
+        let p = price.unwrap();
+        let shares = size;
+        let usdc = p * shares;
+        let ma = U256::from((usdc * scale as f64) as u128);
+        let ta = U256::from((shares * scale as f64) as u128);
+        (ma, ta, Some(p))
+    };
+
+    let order = Order {
+        salt: salt_val,
+        maker,
+        signer: maker,
+        taker: zero_addr,
+        tokenId: token_id,
+        makerAmount: maker_amount,
+        takerAmount: taker_amount,
+        expiration: U256::ZERO,
+        nonce: U256::ZERO,
+        feeRateBps: U256::from(fee_rate_bps),
+        side: 0u8, // buy
+        signatureType: 0u8,
+    };
+
+    // EIP-712 sign
+    let domain = alloy::sol_types::Eip712Domain {
+        name: Some("Limitless CTF Exchange".into()),
+        version: Some("1".into()),
+        chain_id: Some(U256::from(CHAIN_ID)),
+        verifying_contract: Some(venue_exchange),
+        salt: None,
+    };
+    let signing_hash = order.eip712_signing_hash(&domain);
+    let signature = signer.sign_hash(&signing_hash).await
+        .map_err(|e| err(format!("Signing failed: {e}")))?;
+
+    let mut sig_bytes = Vec::with_capacity(65);
+    sig_bytes.extend_from_slice(&signature.r().to_be_bytes::<32>());
+    sig_bytes.extend_from_slice(&signature.s().to_be_bytes::<32>());
+    sig_bytes.push(if signature.v() { 28 } else { 27 });
+    let sig_hex = format!("0x{}", hex::encode(&sig_bytes));
+
+    // Build order payload
+    let mut order_payload = serde_json::json!({
+        "salt":          salt_val.to::<u64>(),
+        "maker":         format!("{maker:#x}"),
+        "signer":        format!("{maker:#x}"),
+        "taker":         "0x0000000000000000000000000000000000000000",
+        "tokenId":       token_id_str,
+        "makerAmount":   maker_amount.to::<u64>(),
+        "takerAmount":   taker_amount.to::<u64>(),
+        "expiration":    "0",
+        "nonce":         0u64,
+        "feeRateBps":    fee_rate_bps,
+        "side":          0u64,
+        "signatureType": 0u64,
+        "signature":     sig_hex,
+    });
+    if let Some(p) = order_price_field {
+        order_payload.as_object_mut().unwrap().insert("price".into(), serde_json::json!(p));
+    }
+
+    let payload = serde_json::json!({
+        "order":      order_payload,
+        "orderType":  order_type,
+        "marketSlug": slug,
+        "ownerId":    owner_id,
+    });
+
+    let resp = http
+        .post(format!("{BASE_URL}/orders"))
+        .json(&payload)
+        .send().await.map_err(|e| err(format!("Order submit failed: {e}")))?;
+
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await
+        .unwrap_or_else(|_| serde_json::json!({ "raw": "non-JSON response" }));
+
+    if !status.is_success() {
+        return Err(err(format!("Order rejected (HTTP {status}): {body}")));
+    }
+
+    Ok(serde_json::json!({
+        "status": "submitted",
+        "slug": slug,
+        "outcome": outcome,
+        "size_usdc": size,
+        "order_type": order_type,
+        "response": body,
+    }))
+}
+
 /// Check USDC balance and open positions via `limitless-cli`.
 /// Credentials are read from limitless-cli's own config — nothing stored in IronClaw .env.
 pub struct LimitlessCheckBalanceTool;
@@ -988,11 +1256,61 @@ impl Tool for LimitlessCheckBalanceTool {
     }
 }
 
-/// Run `limitless-cli <args> -o json` and parse stdout as JSON.
+/// Fetch on-chain USDC balance from BaseScan for the configured wallet.
+pub struct LimitlessBaseScanBalanceTool;
+
+impl LimitlessBaseScanBalanceTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl Tool for LimitlessBaseScanBalanceTool {
+    fn name(&self) -> &str {
+        "limitless_basescan_balance"
+    }
+
+    fn description(&self) -> &str {
+        "Fetch on-chain USDC balance from BaseScan for the wallet set in \
+         LIMITLESS_WALLET_ADDRESS. Reads BASESCAN_API_KEY and LIMITLESS_WALLET_ADDRESS \
+         from process env or ~/.ironclaw/.env."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        let wallet = read_env_var("LIMITLESS_WALLET_ADDRESS").unwrap_or_else(|| "unknown".into());
+        let balance = fetch_usdc_balance_via_basescan().await?;
+        Ok(ToolOutput::success(
+            serde_json::json!({
+                "wallet": wallet,
+                "usdc_balance": balance,
+                "source": "BaseScan (on-chain)",
+            }),
+            start.elapsed(),
+        ))
+    }
+}
+
+/// Run `limitless <args> -o json` and parse stdout as JSON.
 async fn run_limitless_cli_json(args: &[&str]) -> Result<serde_json::Value, String> {
     let mut cmd = tokio::process::Command::new("limitless");
     cmd.args(args);
     cmd.args(["-o", "json"]);
+    if let Some(k) = read_env_var("LIMITLESS_API_KEY") {
+        cmd.env("LIMITLESS_API_KEY", k);
+    }
+    if let Some(k) = read_env_var("LIMITLESS_PRIVATE_KEY") {
+        cmd.env("LIMITLESS_PRIVATE_KEY", k);
+    }
     cmd.kill_on_drop(true);
 
     let output = tokio::time::timeout(Duration::from_secs(30), cmd.output())
@@ -1495,56 +1813,6 @@ async fn fetch_usdc_balance_via_basescan() -> Result<f64, ToolError> {
     Ok(micro as f64 / 1_000_000.0)
 }
 
-/// Fetch USDC balance via `limitless portfolio allowance -o json`.
-/// limitless reads credentials from its own config — no env injection needed.
-async fn fetch_usdc_balance_via_cli() -> Result<f64, ToolError> {
-    let mut cmd = tokio::process::Command::new("limitless");
-    cmd.args(["portfolio", "allowance", "-o", "json"]);
-    if let Some(k) = read_env_var("LIMITLESS_API_KEY") {
-        cmd.env("LIMITLESS_API_KEY", k);
-    }
-    if let Some(k) = read_env_var("LIMITLESS_PRIVATE_KEY") {
-        cmd.env("LIMITLESS_PRIVATE_KEY", k);
-    }
-    cmd.kill_on_drop(true);
-
-    let output = tokio::time::timeout(Duration::from_secs(30), cmd.output())
-        .await
-        .map_err(|_| ToolError::ExecutionFailed("limitless balance timed out".to_string()))?
-        .map_err(|e| {
-            ToolError::ExecutionFailed(format!("limitless failed to start: {e}"))
-        })?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if !output.status.success() {
-        return Err(ToolError::ExecutionFailed(format!(
-            "limitless allowance exit {}: {stdout}{stderr}",
-            output.status.code().unwrap_or(-1)
-        )));
-    }
-
-    let body: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|e| {
-        ToolError::ExecutionFailed(format!("Balance JSON parse failed: {e}: {stdout}"))
-    })?;
-
-    // The allowance response contains the available USDC balance
-    for key in &["availableBalance", "usdcBalance", "balance", "collateral", "allowance"] {
-        if let Some(f) = body[key].as_f64() {
-            return Ok(f);
-        }
-        if let Some(s) = body[key].as_str() {
-            if let Ok(f) = s.parse::<f64>() {
-                return Ok(f);
-            }
-        }
-    }
-
-    Err(ToolError::ExecutionFailed(format!(
-        "Cannot find balance field in allowance response: {body}"
-    )))
-}
 
 async fn execute_limitless_order(
     slug: &str,

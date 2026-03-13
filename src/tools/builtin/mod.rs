@@ -40,8 +40,8 @@ pub use secrets_tools::{SecretDeleteTool, SecretListTool};
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use prediction::{
-    BtcFetchCandlesTool, BtcFetchTaTool, LimitlessCheckBalanceTool, LimitlessComputeSignalTool,
-    LimitlessFetchMarketsTool, LimitlessPlaceOrdersTool,
+    BtcFetchCandlesTool, BtcFetchTaTool, LimitlessBaseScanBalanceTool, LimitlessCheckBalanceTool,
+    LimitlessComputeSignalTool, LimitlessFetchMarketsTool, LimitlessPlaceOrderHttpTool, LimitlessPlaceOrdersTool,
 };
 pub use time::TimeTool;
 mod html_converter;

@@ -136,9 +136,11 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 hmac = "0.12"
 sha2 = "0.10"
+sha3 = "0.10"
 blake3 = "1"
 rand = "0.8"
 subtle = "2"  # Constant-time comparisons for token validation
+alloy = { version = "1", default-features = false, features = ["sol-types", "signer-local", "signers"] }  # EIP-712 signing for Limitless orders
 
 # Multi-provider LLM support
 rig-core = "0.30"

@@ -9,7 +9,7 @@ use ironclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, ChannelSecretUpdater, GatewayChannel, HttpChannel, ReplChannel,
+        ChannelManager, GatewayChannel, HttpChannel, ReplChannel,
         SignalChannel, WebhookServer, WebhookServerConfig,
         wasm::{WasmChannelRouter, WasmChannelRuntime},
         web::log_layer::LogBroadcaster,

@@ -17,8 +17,8 @@ use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder
 use crate::tools::builtin::{
     ApplyPatchTool, BtcFetchCandlesTool, BtcFetchTaTool, CancelJobTool, CreateJobTool, EchoTool,
     ExtensionInfoTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
-    LimitlessCheckBalanceTool, LimitlessComputeSignalTool, LimitlessFetchMarketsTool,
-    LimitlessPlaceOrdersTool, ListDirTool,
+    LimitlessBaseScanBalanceTool, LimitlessCheckBalanceTool, LimitlessComputeSignalTool,
+    LimitlessFetchMarketsTool, LimitlessPlaceOrderHttpTool, LimitlessPlaceOrdersTool, ListDirTool,
     ListJobsTool, MemoryReadTool,
     MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool,
     SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool,
@@ -330,8 +330,10 @@ impl ToolRegistry {
         ))));
         self.register_sync(Arc::new(LimitlessPlaceOrdersTool::new(Arc::clone(&workspace))));
         self.register_sync(Arc::new(LimitlessCheckBalanceTool::new()));
+        self.register_sync(Arc::new(LimitlessBaseScanBalanceTool::new()));
+        self.register_sync(Arc::new(LimitlessPlaceOrderHttpTool::new()));
 
-        tracing::debug!("Registered 6 prediction tools");
+        tracing::debug!("Registered 8 prediction tools");
     }
 
     /// Register job management tools.
