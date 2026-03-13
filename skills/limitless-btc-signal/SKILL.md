@@ -111,8 +111,9 @@ For each market in `limitless/btc-15m/snapshot`:
      → decision = NO
    - If signal is mixed (score -3 to +3) → SKIP (do not place order)
 4. Calculate USDC quantity:
-   - Base size = 10% of available USDC balance (read from context or estimate
-     $10 as default if balance is unknown).
+   - If `|yes_score - no_score| <= 2` (weak conviction) → Base size = 3% of available USDC balance.
+   - Otherwise (strong conviction) → Base size = 10% of available USDC balance.
+   - Use $10 as default if balance is unknown.
    - Scale by conviction: score ≥ 6 → 100%, score 4-5 → 75%, score 3 → 50%.
    - Minimum $1.00; if below, SKIP the market.
    - Maximum $50.00 per market without prior approval.
@@ -126,6 +127,8 @@ Write the result to `limitless/btc-15m/signal`:
   "computed_at": "<ISO timestamp>",
   "btc_price_15m": "<last confirmed 15m close>",
   "score": "<integer -10 to +10>",
+  "yes_score": "<count of bullish signals across all timeframes>",
+  "no_score": "<count of bearish signals across all timeframes>",
   "markets": [
     {
       "market_id": "<id>",

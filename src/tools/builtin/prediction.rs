@@ -642,15 +642,15 @@ impl Tool for LimitlessComputeSignalTool {
 
 // ── Tool 4: limitless_place_orders ────────────────────────────────────────────
 
-/// Read the signal from memory, fetch live USDC balance via `limitless-cli`,
-/// and place orders via `limitless-cli`. Order size is capped at 10% of
-/// available balance.
+/// Read the signal from memory, fetch live USDC balance via BaseScan,
+/// and place orders via `limitless`. Order size is 10% of available balance
+/// (3% when YES/NO conviction diff ≤ 2).
 ///
-/// Credentials (API key and private key) are read from limitless-cli's own
-/// config (`~/.config/limitless/` or its `.env` file). Do NOT store them in
-/// IronClaw's `.env`.
+/// Requires env vars: `BASESCAN_API_KEY`, `LIMITLESS_WALLET_ADDRESS`.
+/// Order placement credentials are read from `limitless`'s own config —
+/// do NOT store them in IronClaw's `.env`.
 ///
-/// Requires: `limitless-cli` on PATH
+/// Requires: `limitless` on PATH
 pub struct LimitlessPlaceOrdersTool {
     workspace: Arc<Workspace>,
 }
@@ -669,10 +669,10 @@ impl Tool for LimitlessPlaceOrdersTool {
 
     fn description(&self) -> &str {
         "Read the YES/NO signal from limitless/btc-15m/signal, fetch live USDC \
-         balance from Limitless Exchange, and place orders via limitless-cli. \
-         Order size is capped at 10% of available balance. Aborts if signal is \
-         stale (> 10 min), score < 5, or insufficient funds. Requires \
-         limitless-cli on PATH. Credentials are read from limitless-cli's own config."
+         balance via BaseScan (on-chain), and place orders via limitless. \
+         Order size is 10% of balance (3% when conviction diff ≤ 2). Aborts if \
+         signal is stale (> 10 min), score < 5, or insufficient funds. Requires \
+         BASESCAN_API_KEY and LIMITLESS_WALLET_ADDRESS env vars, and limitless on PATH."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -756,15 +756,15 @@ impl Tool for LimitlessPlaceOrdersTool {
             }
         }
 
-        let score = signal["score"].as_u64().unwrap_or(0) as u8;
+        let score = signal["score"].as_i64().unwrap_or(0);
         let direction = signal["direction"].as_str().unwrap_or("SKIP");
 
-        if score < 5 || direction == "SKIP" {
+        if score.unsigned_abs() < 5 || direction == "SKIP" {
             return Ok(ToolOutput::success(
                 serde_json::json!({
                     "status": "skipped",
                     "reason": signal["skip_reason"].as_str().unwrap_or("Score < 5 or no direction"),
-                    "score": score,
+                    "score": score.unsigned_abs(),
                 }),
                 start.elapsed(),
             ));
@@ -798,7 +798,7 @@ impl Tool for LimitlessPlaceOrdersTool {
             .await
             .ok();
 
-        let available_balance = fetch_usdc_balance_via_cli().await?;
+        let available_balance = fetch_usdc_balance_via_basescan().await?;
 
         if available_balance <= 0.0 {
             return Err(ToolError::ExecutionFailed(format!(
@@ -806,7 +806,12 @@ impl Tool for LimitlessPlaceOrdersTool {
             )));
         }
 
-        let order_size = (available_balance * 0.10 * 100.0).floor() / 100.0;
+        // Use yes_score/no_score diff if present; fall back to |score|.
+        let yes_score = signal["yes_score"].as_i64().unwrap_or(score.max(0));
+        let no_score = signal["no_score"].as_i64().unwrap_or((-score).max(0));
+        let conviction_diff = (yes_score - no_score).abs();
+        let size_pct = if conviction_diff <= 2 { 0.03 } else { 0.10 };
+        let order_size = (available_balance * size_pct * 100.0).floor() / 100.0;
         if order_size < 1.0 {
             return Err(ToolError::ExecutionFailed(format!(
                 "Insufficient funds: order size {order_size:.2} < $1.00 minimum. \
@@ -1402,8 +1407,57 @@ fn parse_strike_from_title(title: &str) -> Option<f64> {
         .and_then(|s| s.trim_end_matches('.').parse::<f64>().ok())
 }
 
-/// Fetch USDC balance via `limitless-cli portfolio allowance -o json`.
-/// limitless-cli reads credentials from its own config — no env injection needed.
+/// Fetch USDC balance from BaseScan (Base network on-chain balance).
+///
+/// Reads `BASESCAN_API_KEY` and `LIMITLESS_WALLET_ADDRESS` from environment.
+/// USDC contract on Base: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 (6 decimals).
+async fn fetch_usdc_balance_via_basescan() -> Result<f64, ToolError> {
+    let api_key = std::env::var("BASESCAN_API_KEY").map_err(|_| {
+        ToolError::ExecutionFailed("BASESCAN_API_KEY env var not set".to_string())
+    })?;
+    let wallet = std::env::var("LIMITLESS_WALLET_ADDRESS").map_err(|_| {
+        ToolError::ExecutionFailed("LIMITLESS_WALLET_ADDRESS env var not set".to_string())
+    })?;
+
+    const USDC_BASE: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+    let url = format!(
+        "https://api.basescan.org/api?module=account&action=tokenbalance\
+         &contractaddress={USDC_BASE}&address={wallet}&tag=latest&apikey={api_key}"
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client build failed: {e}")))?;
+
+    let body: serde_json::Value = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("BaseScan request failed: {e}")))?
+        .json()
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("BaseScan JSON parse failed: {e}")))?;
+
+    if body["status"].as_str() != Some("1") {
+        return Err(ToolError::ExecutionFailed(format!(
+            "BaseScan error: {}",
+            body["message"].as_str().unwrap_or("unknown")
+        )));
+    }
+
+    // result is balance in micro-USDC (6 decimals)
+    let raw = body["result"]
+        .as_str()
+        .ok_or_else(|| ToolError::ExecutionFailed("BaseScan result missing".to_string()))?;
+    let micro: u128 = raw.parse().map_err(|e| {
+        ToolError::ExecutionFailed(format!("BaseScan balance parse failed: {e}: {raw}"))
+    })?;
+    Ok(micro as f64 / 1_000_000.0)
+}
+
+/// Fetch USDC balance via `limitless portfolio allowance -o json`.
+/// limitless reads credentials from its own config — no env injection needed.
 async fn fetch_usdc_balance_via_cli() -> Result<f64, ToolError> {
     let mut cmd = tokio::process::Command::new("limitless");
     cmd.args(["portfolio", "allowance", "-o", "json"]);
