@@ -1302,7 +1302,7 @@ impl Tool for LimitlessBaseScanBalanceTool {
 
 /// Run `limitless <args> -o json` and parse stdout as JSON.
 async fn run_limitless_cli_json(args: &[&str]) -> Result<serde_json::Value, String> {
-    let mut cmd = tokio::process::Command::new("limitless");
+    let mut cmd = limitless_cli_cmd();
     cmd.args(args);
     cmd.args(["-o", "json"]);
     if let Ok(k) = std::env::var("LIMITLESS_API_KEY") {
@@ -1739,6 +1739,16 @@ fn parse_strike_from_title(title: &str) -> Option<f64> {
 }
 
 
+/// Resolve the `limitless` binary path.
+///
+/// Checks `LIMITLESS_CLI_PATH` first (allows pointing to a full path like
+/// `C:\TrustFlow\limitless-cli\target\release\limitless.exe`), then falls
+/// back to `"limitless"` (assumes it's on PATH).
+fn limitless_cli_cmd() -> tokio::process::Command {
+    let bin = std::env::var("LIMITLESS_CLI_PATH").unwrap_or_else(|_| "limitless".to_string());
+    tokio::process::Command::new(bin)
+}
+
 /// Fetch USDC balance from BaseScan (Base network on-chain balance).
 ///
 /// Reads `BASESCAN_API_KEY` and `LIMITLESS_WALLET_ADDRESS` from process env
@@ -1801,7 +1811,7 @@ async fn execute_limitless_order(
     size: f64,
     order_type: &str,
 ) -> Result<String, ToolError> {
-    let mut cmd = tokio::process::Command::new("limitless");
+    let mut cmd = limitless_cli_cmd();
     cmd.args([
         "trading", "create",
         "--slug", slug,
