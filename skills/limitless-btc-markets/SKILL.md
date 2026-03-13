@@ -1,6 +1,6 @@
 ---
 name: limitless-btc-markets
-version: 0.2.0
+version: 0.3.0
 description: "Query active BTC 15-minute prediction markets from Limitless Exchange using the public REST API. Use when asked about BTC 15m markets, current prediction prices, or Limitless Exchange market data."
 activation:
   keywords:
@@ -30,9 +30,10 @@ activation:
 
 # Limitless Exchange — BTC 15m Active Markets
 
-Call the `limitless_fetch_markets` tool. It fetches active BTC 15-minute
-prediction markets from Limitless Exchange (category 2), filters for 15m
-markets, and stores the snapshot to memory.
+Call the `limitless_fetch_markets` tool. It fetches BTC markets from Limitless
+Exchange (category 2), then filters to only open, non-resolved markets whose
+title or slug contains "15m" / "15 min" / "15-min". Other markets are discarded.
+The filtered snapshot is stored to memory.
 
 ```
 limitless_fetch_markets
