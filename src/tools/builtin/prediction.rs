@@ -520,20 +520,18 @@ impl Tool for LimitlessComputeSignalTool {
                     0.0
                 };
 
-                let (raw_decision, raw_reason) = if bb_squeeze || low_volume {
+                let (decision, reason) = if bb_squeeze || low_volume {
                     // Uncertain market conditions: skip gap logic, use raw TA scores.
-                    // Tie defaults to NO (conservative).
+                    // Tie → higher score wins; if equal, NO (conservative).
                     let cond = if bb_squeeze { "BB squeeze" } else { "low volume" };
-                    if long_score > short_score {
-                        ("YES", format!("{cond}: bull={long_score} > bear={short_score} gap={gap_pct:+.2}%"))
-                    } else if short_score > long_score {
-                        ("NO", format!("{cond}: bear={short_score} > bull={long_score} gap={gap_pct:+.2}%"))
+                    if long_score >= short_score {
+                        ("YES", format!("{cond}: bull={long_score} >= bear={short_score} gap={gap_pct:+.2}%"))
                     } else {
-                        ("NO", format!("{cond}: scores tied ({long_score}={short_score}), default NO gap={gap_pct:+.2}%"))
+                        ("NO", format!("{cond}: bear={short_score} > bull={long_score} gap={gap_pct:+.2}%"))
                     }
                 } else {
                     // Normal decision: gap position + TA momentum.
-                    // Exactly at strike with equal scores → NO (conservative).
+                    // Exactly at strike → higher score wins; if equal, NO (conservative).
                     let d = if gap_pct > 1.0 {
                         if net_score <= -4 { "NO" } else { "YES" }
                     } else if gap_pct < -1.0 {
@@ -543,27 +541,11 @@ impl Tool for LimitlessComputeSignalTool {
                     } else if gap_pct < 0.0 {
                         if net_score >= 2 { "YES" } else { "NO" }
                     } else {
-                        // Exactly at strike: stronger TA side wins; tie → NO.
-                        if long_score > short_score { "YES" } else { "NO" }
+                        // Exactly at strike: higher score wins; tie → YES.
+                        if long_score >= short_score { "YES" } else { "NO" }
                     };
                     (d, format!("gap={gap_pct:+.2}% net_score={net_score:+} (bull={long_score} bear={short_score})"))
                 };
-
-                // Final override: weak YES conviction → force NO.
-                // yes_score < 5 AND (yes_score - no_score) <= 1 means bullish case
-                // is too weak — default to NO regardless of gap decision.
-                let (decision, reason) =
-                    if long_score < 5 && (long_score as i8 - short_score as i8) <= 1 {
-                        (
-                            "NO",
-                            format!(
-                                "weak YES override: yes={long_score} no={short_score} margin={} (was {raw_decision})",
-                                long_score as i8 - short_score as i8,
-                            ),
-                        )
-                    } else {
-                        (raw_decision, raw_reason)
-                    };
 
                 serde_json::json!({
                     "market_id": m.market_id,

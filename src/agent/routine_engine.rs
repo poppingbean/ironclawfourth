@@ -658,18 +658,19 @@ async fn execute_full_job(
     // Always tools require explicit listing in tool_permissions.
     let approval_context = ApprovalContext::autonomous_with_tools(tool_permissions.iter().cloned());
 
-    // Stop and fully remove all prior jobs before dispatching a new routine job
-    // so stale/zombie jobs never accumulate and hit the parallel-job cap.
-    let prior_jobs = scheduler.running_jobs().await;
-    if !prior_jobs.is_empty() {
+    // Stop and fully remove ALL jobs (scheduler + context manager) before dispatching
+    // a new routine job so stale/zombie jobs never accumulate and hit the parallel-job cap.
+    scheduler.stop_all().await;
+    scheduler.cleanup_finished().await;
+    let cm = scheduler.context_manager();
+    let all_jobs = cm.all_jobs().await;
+    if !all_jobs.is_empty() {
         tracing::info!(
             routine = %routine.name,
-            count = prior_jobs.len(),
-            "Stopping and removing prior jobs before routine dispatch"
+            count = all_jobs.len(),
+            "Removing all prior job contexts before routine dispatch"
         );
-        scheduler.stop_all().await;
-        let cm = scheduler.context_manager();
-        for job_id in &prior_jobs {
+        for job_id in &all_jobs {
             if let Err(e) = cm.remove_job(*job_id).await {
                 tracing::warn!(
                     routine = %routine.name,
