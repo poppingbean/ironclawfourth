@@ -508,34 +508,11 @@ impl Tool for LimitlessComputeSignalTool {
         let bb_squeeze = ta_15m.bb_width < 0.015;
         let low_volume = ta_15m.volume_ratio < 0.4;
 
-        // Global skip overrides — unpredictable conditions
-        let global_skip_reason: Option<&str> = if bb_squeeze {
-            Some("BB squeeze on 15m — breakout direction unknown")
-        } else if low_volume {
-            Some("Volume ratio on 15m < 0.4 — no momentum")
-        } else {
-            None
-        };
-
         let current_price = ta_15m.current_price;
 
         let market_signals: Vec<serde_json::Value> = markets
             .iter()
             .map(|m| {
-                if let Some(reason) = global_skip_reason {
-                    return serde_json::json!({
-                        "market_id": m.market_id,
-                        "title": m.title,
-                        "slug": m.slug,
-                        "current_price": current_price,
-                        "decision": "SKIP",
-                        "reason": reason,
-                        "yes_price": m.yes_price,
-                        "no_price": m.no_price,
-                        "liquidity": m.liquidity,
-                    });
-                }
-
                 let strike = parse_strike_from_title(&m.title).unwrap_or(0.0);
                 let gap_pct = if strike > 0.0 {
                     (current_price - strike) / strike * 100.0
@@ -543,35 +520,34 @@ impl Tool for LimitlessComputeSignalTool {
                     0.0
                 };
 
-                // Per-market decision: will price close ABOVE (YES) or BELOW (NO) strike?
-                //
-                // Logic combines:
-                //   gap_pct  = how far current price is from strike (+ = above, - = below)
-                //   net_score = TA momentum (+ = bullish, - = bearish)
-                //
-                // If price is already comfortably above strike (>1%), only strongly bearish
-                // TA overrides YES. If price is below strike (<-1%), only strongly bullish
-                // TA can produce YES.
-                let decision = if gap_pct > 1.0 {
-                    // Comfortably above — stays YES unless strongly bearish
-                    if net_score <= -4 { "NO" } else { "YES" }
-                } else if gap_pct < -1.0 {
-                    // Comfortably below — stays NO unless strongly bullish
-                    if net_score >= 4 { "YES" } else { "NO" }
-                } else if gap_pct > 0.0 {
-                    // Slightly above strike — neutral/bullish → YES, bearish → NO
-                    if net_score >= -2 { "YES" } else { "NO" }
-                } else if gap_pct < 0.0 {
-                    // Slightly below strike — needs bullish push to cross
-                    if net_score >= 2 { "YES" } else { "NO" }
+                let (decision, reason) = if bb_squeeze || low_volume {
+                    // Uncertain market conditions: skip gap logic, use raw TA scores.
+                    // Tie defaults to NO (conservative).
+                    let cond = if bb_squeeze { "BB squeeze" } else { "low volume" };
+                    if long_score > short_score {
+                        ("YES", format!("{cond}: bull={long_score} > bear={short_score} gap={gap_pct:+.2}%"))
+                    } else if short_score > long_score {
+                        ("NO", format!("{cond}: bear={short_score} > bull={long_score} gap={gap_pct:+.2}%"))
+                    } else {
+                        ("NO", format!("{cond}: scores tied ({long_score}={short_score}), default NO gap={gap_pct:+.2}%"))
+                    }
                 } else {
-                    // Exactly at strike — skip (50/50)
-                    "SKIP"
+                    // Normal decision: gap position + TA momentum.
+                    // Exactly at strike with equal scores → NO (conservative).
+                    let d = if gap_pct > 1.0 {
+                        if net_score <= -4 { "NO" } else { "YES" }
+                    } else if gap_pct < -1.0 {
+                        if net_score >= 4 { "YES" } else { "NO" }
+                    } else if gap_pct > 0.0 {
+                        if net_score >= -2 { "YES" } else { "NO" }
+                    } else if gap_pct < 0.0 {
+                        if net_score >= 2 { "YES" } else { "NO" }
+                    } else {
+                        // Exactly at strike: stronger TA side wins; tie → NO.
+                        if long_score > short_score { "YES" } else { "NO" }
+                    };
+                    (d, format!("gap={gap_pct:+.2}% net_score={net_score:+} (bull={long_score} bear={short_score})"))
                 };
-
-                let reason = format!(
-                    "gap={gap_pct:+.2}% net_score={net_score:+} (bull={long_score} bear={short_score})"
-                );
 
                 serde_json::json!({
                     "market_id": m.market_id,
@@ -792,11 +768,12 @@ impl Tool for LimitlessPlaceOrdersTool {
         let conviction_diff = (yes_score - no_score).abs();
         let weak_conviction = conviction_diff <= 2;
 
-        let (order_size, balance_source) = match balance_result {
+        // Store raw balance for per-market low-liquidity 3% override.
+        let (balance_usdc, order_size, balance_source) = match balance_result {
             Ok(bal) if bal > 0.0 => {
                 let size_pct = if weak_conviction { 0.03 } else { 0.10 };
                 let sz = (bal * size_pct * 100.0).floor() / 100.0;
-                (sz, format!("BaseScan (${bal:.2})"))
+                (Some(bal), sz, format!("BaseScan (${bal:.2})"))
             }
             Ok(_) => {
                 return Err(ToolError::ExecutionFailed(
@@ -808,7 +785,7 @@ impl Tool for LimitlessPlaceOrdersTool {
                 // Fallback fixed amounts: 10% tier = $6, 3% tier = $2
                 let sz = if weak_conviction { 2.0_f64 } else { 6.0_f64 };
                 tracing::warn!("BaseScan balance fetch failed ({e}), using fallback ${sz:.2}");
-                (sz, format!("fallback (BaseScan unavailable: {e})"))
+                (None, sz, format!("fallback (BaseScan unavailable: {e})"))
             }
         };
 
@@ -853,16 +830,25 @@ impl Tool for LimitlessPlaceOrdersTool {
             } else {
                 meta.and_then(|m| m["no_price"].as_f64()).unwrap_or(0.5)
             };
-            // If liquidity is zero, use GTC (limit order — fills when liquidity appears).
-            // Otherwise: |score| >= 7 → FOK (strong conviction), < 7 → GTC (limit order).
-            let order_type = if liquidity == 0.0 || score.unsigned_abs() < 7 { "GTC" } else { "FOK" };
+            // Liquidity ≤ $5: conservative GTC + 3% size (limit order, fills when liquidity appears).
+            // Liquidity > $5: score ≥ 7 → FOK (fill-or-kill); < 7 → GTC.
+            let (order_type, this_order_size) = if liquidity <= 5.0 {
+                let sz = balance_usdc
+                    .map(|b| (b * 0.03 * 100.0).floor() / 100.0)
+                    .unwrap_or(2.0);
+                ("GTC", sz)
+            } else if score.unsigned_abs() >= 7 {
+                ("FOK", order_size)
+            } else {
+                ("GTC", order_size)
+            };
 
             if dry_run {
                 order_results.push(serde_json::json!({
                     "slug": slug,
                     "outcome": outcome,
                     "price": price,
-                    "size_usdc": order_size,
+                    "size_usdc": this_order_size,
                     "order_type": order_type,
                     "status": "dry_run",
                 }));
@@ -875,7 +861,7 @@ impl Tool for LimitlessPlaceOrdersTool {
                 &pk_str,
                 slug,
                 &outcome,
-                order_size,
+                this_order_size,
                 order_type,
                 price_arg,
             )
@@ -887,7 +873,7 @@ impl Tool for LimitlessPlaceOrdersTool {
                     "slug": slug,
                     "outcome": outcome,
                     "price": price,
-                    "size_usdc": order_size,
+                    "size_usdc": this_order_size,
                     "order_type": order_type,
                     "status": "error",
                     "error": e.to_string(),

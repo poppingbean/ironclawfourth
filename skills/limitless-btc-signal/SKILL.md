@@ -1,6 +1,6 @@
 ---
 name: limitless-btc-signal
-version: 0.5.0
+version: 0.6.0
 description: "Fetch BTC/USDT OHLCV from Binance (5m/15m/1h/4h), compute multi-timeframe TA indicators, and produce a per-market YES/NO decision for each active Limitless Exchange prediction market."
 activation:
   keywords:
@@ -71,11 +71,12 @@ Reads the TA snapshots and the market snapshot from `limitless/btc-15m/snapshot`
 For each active market, compares the current BTC price to the market strike price
 and combines that gap with the TA momentum score to decide YES or NO:
 
+Every market always gets YES or NO — never SKIP:
+
 - Price comfortably above strike (>1%) + not strongly bearish → **YES**
 - Price comfortably below strike (<-1%) + not strongly bullish → **NO**
-- Price near strike: follows net TA momentum direction
-- BB squeeze or very low volume → **SKIP** (unpredictable)
-- Market liquidity < $500 → **SKIP**
+- Price near strike: follows net TA momentum direction; tie at exact strike → **NO**
+- BB squeeze or very low volume: picks the higher raw TA score; tie → **NO** (conservative)
 
 Writes the result to `limitless/btc-15m/signal`:
 
@@ -94,8 +95,8 @@ Writes the result to `limitless/btc-15m/signal`:
       "strike": <float>,
       "current_price": <float>,
       "gap_pct": <float>,
-      "decision": "YES|NO|SKIP",
-      "reason": "<gap + score explanation>",
+      "decision": "YES|NO",
+      "reason": "<explanation>",
       "yes_price": <float>,
       "no_price": <float>,
       "liquidity": <float>
