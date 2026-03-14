@@ -754,11 +754,12 @@ impl Tool for LimitlessPlaceOrdersTool {
                 "LIMITLESS_API_KEY not set — add to ~/.ironclaw/.env".into(),
             )
         })?;
-        let pk_str = read_env_var("LIMITLESS_PRIVATE_KEY").ok_or_else(|| {
-            ToolError::ExecutionFailed(
+        // LIMITLESS_PRIVATE_KEY is injected into the CLI child process env at call-time.
+        if read_env_var("LIMITLESS_PRIVATE_KEY").is_none() {
+            return Err(ToolError::ExecutionFailed(
                 "LIMITLESS_PRIVATE_KEY not set — add to ~/.ironclaw/.env".into(),
-            )
-        })?;
+            ));
+        }
 
         let balance_result = fetch_usdc_balance_via_basescan().await;
 
@@ -855,17 +856,16 @@ impl Tool for LimitlessPlaceOrdersTool {
                 continue;
             }
 
-            let price_arg = if order_type == "GTC" { Some(price) } else { None };
-            let result = limitless_http_place_order(
+            let result = execute_limitless_order(
                 &api_key,
-                &pk_str,
                 slug,
                 &outcome,
+                price,
                 this_order_size,
                 order_type,
-                price_arg,
             )
-            .await;
+            .await
+            .map(|stdout| serde_json::from_str(&stdout).unwrap_or(serde_json::json!({"raw": stdout})));
 
             order_results.push(match result {
                 Ok(v) => v,
@@ -1831,6 +1831,7 @@ async fn fetch_usdc_balance_via_basescan() -> Result<f64, ToolError> {
 
 
 async fn execute_limitless_order(
+    api_key: &str,
     slug: &str,
     outcome: &str,
     price: f64,
@@ -1838,6 +1839,8 @@ async fn execute_limitless_order(
     order_type: &str,
 ) -> Result<String, ToolError> {
     let mut cmd = limitless_cli_cmd();
+    // --api-key must come before the subcommand
+    cmd.args(["--api-key", api_key]);
     cmd.args([
         "trading", "create",
         "--slug", slug,
@@ -1852,12 +1855,9 @@ async fn execute_limitless_order(
         cmd.args(["--price", &format!("{price:.4}")]);
     }
 
-    // Inject credentials into the child process env (loaded at startup by bootstrap).
-    if let Ok(api_key) = std::env::var("LIMITLESS_API_KEY") {
-        cmd.env("LIMITLESS_API_KEY", api_key);
-    }
-    if let Ok(private_key) = std::env::var("LIMITLESS_PRIVATE_KEY") {
-        cmd.env("LIMITLESS_PRIVATE_KEY", private_key);
+    // Inject private key into child process env (read from .env at call-time).
+    if let Some(pk) = read_env_var("LIMITLESS_PRIVATE_KEY") {
+        cmd.env("LIMITLESS_PRIVATE_KEY", pk);
     }
 
     cmd.kill_on_drop(true);
