@@ -1,6 +1,6 @@
 ---
 name: limitless-btc-order
-version: 0.3.0
+version: 0.4.0
 description: "Read the YES/NO signal from memory and place orders on Limitless Exchange via direct HTTP API (EIP-712 signed, no CLI required)."
 activation:
   keywords:
@@ -77,7 +77,7 @@ routine_create:
   name: "limitless-order-15m"
   description: "Read YES/NO signal from memory, fetch live USDC balance, place orders on Limitless Exchange via HTTP API."
   trigger_type: "cron"
-  schedule: "0 5,20,35,50 * * * *"
+  schedule: "0 10,25,40,55 * * * *"
   action_type: "full_job"
   cooldown_secs: 840
   tool_permissions:
@@ -92,5 +92,5 @@ routine_create:
 ```
 :00:15  limitless-markets-15m  → limitless/btc-15m/snapshot
 :02:00  limitless-signal-15m   → ta/btc/{5m,15m,1h,4h} + limitless/btc-15m/signal
-:05:00  limitless-order-15m    → orders placed  ← this step
+:10:00  limitless-order-15m    → orders placed  ← this step
 ```
