@@ -520,7 +520,7 @@ impl Tool for LimitlessComputeSignalTool {
                     0.0
                 };
 
-                let (decision, reason) = if bb_squeeze || low_volume {
+                let (raw_decision, raw_reason) = if bb_squeeze || low_volume {
                     // Uncertain market conditions: skip gap logic, use raw TA scores.
                     // Tie defaults to NO (conservative).
                     let cond = if bb_squeeze { "BB squeeze" } else { "low volume" };
@@ -548,6 +548,22 @@ impl Tool for LimitlessComputeSignalTool {
                     };
                     (d, format!("gap={gap_pct:+.2}% net_score={net_score:+} (bull={long_score} bear={short_score})"))
                 };
+
+                // Final override: weak YES conviction → force NO.
+                // yes_score < 5 AND (yes_score - no_score) <= 1 means bullish case
+                // is too weak — default to NO regardless of gap decision.
+                let (decision, reason) =
+                    if long_score < 5 && (long_score as i8 - short_score as i8) <= 1 {
+                        (
+                            "NO",
+                            format!(
+                                "weak YES override: yes={long_score} no={short_score} margin={} (was {raw_decision})",
+                                long_score as i8 - short_score as i8,
+                            ),
+                        )
+                    } else {
+                        (raw_decision, raw_reason)
+                    };
 
                 serde_json::json!({
                     "market_id": m.market_id,
@@ -1781,22 +1797,27 @@ fn limitless_cli_cmd() -> tokio::process::Command {
 /// (loaded at startup from `~/.ironclaw/.env` by bootstrap).
 /// USDC contract on Base: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 (6 decimals).
 async fn fetch_usdc_balance_via_basescan() -> Result<f64, ToolError> {
-    let api_key = read_env_var("BASESCAN_API_KEY").ok_or_else(|| {
-        ToolError::ExecutionFailed(
-            "BASESCAN_API_KEY not set — add it to ~/.ironclaw/.env".to_string(),
-        )
-    })?;
     let wallet = read_env_var("LIMITLESS_WALLET_ADDRESS").ok_or_else(|| {
         ToolError::ExecutionFailed(
             "LIMITLESS_WALLET_ADDRESS not set — add it to ~/.ironclaw/.env".to_string(),
         )
     })?;
 
+    // Call balanceOf(address) on USDC contract directly via public Base RPC.
+    // No API key required.
     const USDC_BASE: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-    let url = format!(
-        "https://api.basescan.org/api?module=account&action=tokenbalance\
-         &contractaddress={USDC_BASE}&address={wallet}&tag=latest&apikey={api_key}"
-    );
+    const BASE_RPC: &str = "https://mainnet.base.org";
+
+    // ABI-encode balanceOf(address): selector 0x70a08231 + 32-byte zero-padded address
+    let addr = wallet.trim_start_matches("0x").trim_start_matches("0X");
+    let data = format!("0x70a08231{:0>64}", addr);
+
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_call",
+        "params": [{"to": USDC_BASE, "data": data}, "latest"],
+        "id": 1
+    });
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -1804,28 +1825,27 @@ async fn fetch_usdc_balance_via_basescan() -> Result<f64, ToolError> {
         .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client build failed: {e}")))?;
 
     let body: serde_json::Value = client
-        .get(&url)
+        .post(BASE_RPC)
+        .json(&payload)
         .send()
         .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("BaseScan request failed: {e}")))?
+        .map_err(|e| ToolError::ExecutionFailed(format!("Base RPC request failed: {e}")))?
         .json()
         .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("BaseScan JSON parse failed: {e}")))?;
+        .map_err(|e| ToolError::ExecutionFailed(format!("Base RPC JSON parse failed: {e}")))?;
 
-    if body["status"].as_str() != Some("1") {
-        return Err(ToolError::ExecutionFailed(format!(
-            "BaseScan error: {}",
-            body["message"].as_str().unwrap_or("unknown")
-        )));
+    if let Some(err) = body.get("error") {
+        return Err(ToolError::ExecutionFailed(format!("Base RPC error: {err}")));
     }
 
-    // result is balance in micro-USDC (6 decimals)
-    let raw = body["result"]
+    // result is a hex-encoded uint256 (USDC has 6 decimals)
+    let hex = body["result"]
         .as_str()
-        .ok_or_else(|| ToolError::ExecutionFailed("BaseScan result missing".to_string()))?;
-    let micro: u128 = raw.parse().map_err(|e| {
-        ToolError::ExecutionFailed(format!("BaseScan balance parse failed: {e}: {raw}"))
-    })?;
+        .ok_or_else(|| ToolError::ExecutionFailed("Base RPC result missing".to_string()))?
+        .trim_start_matches("0x")
+        .trim_start_matches("0X");
+    let micro = u128::from_str_radix(hex, 16)
+        .map_err(|e| ToolError::ExecutionFailed(format!("Balance hex parse failed: {e}: {hex}")))?;
     Ok(micro as f64 / 1_000_000.0)
 }
 
