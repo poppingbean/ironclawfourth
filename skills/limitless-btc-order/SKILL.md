@@ -1,6 +1,6 @@
 ---
 name: limitless-btc-order
-version: 0.4.0
+version: 0.5.0
 description: "Read the YES/NO signal from memory and place orders on Limitless Exchange via direct HTTP API (EIP-712 signed, no CLI required)."
 activation:
   keywords:
@@ -48,10 +48,11 @@ limitless_place_orders dry_run=true
 
 1. Reads `limitless/btc-15m/signal` — aborts if older than 10 minutes
 2. Filters markets to those with `decision = YES` or `decision = NO`
-3. Fetches live USDC balance from BaseScan (on-chain)
-4. Calculates order size: 10% of balance (strong conviction) or 3% (weak: `|yes_score - no_score| ≤ 2`)
-5. Fallback if BaseScan unavailable: $6.00 (strong) or $2.00 (weak)
-6. Signs and submits each order via `POST /orders` with EIP-712
+3. Fetches live BTC price from Binance at order time (T+10) and compares to each market's strike price — flips decision if live price moved >2% against the signal
+4. Fetches live USDC balance from BaseScan (on-chain)
+5. Calculates order size: 10% of balance (strong conviction) or 3% (weak: `|yes_score - no_score| ≤ 2`)
+6. Fallback if BaseScan unavailable: $6.00 (strong) or $2.00 (weak)
+7. Places each order via the Limitless CLI
 
 ## Guards enforced by the tool
 

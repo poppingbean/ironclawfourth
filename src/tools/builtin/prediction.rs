@@ -520,31 +520,55 @@ impl Tool for LimitlessComputeSignalTool {
                     0.0
                 };
 
+                // Market's implied probability from orderbook pricing.
+                // yes_price is the probability the market assigns to YES outcome.
+                let market_yes_prob = m.yes_price; // 0.0–1.0
+                let market_says_yes = market_yes_prob > 0.5;
+                let market_strong_yes = market_yes_prob >= 0.70;
+                let market_strong_no = market_yes_prob <= 0.30;
+
                 let (decision, reason) = if bb_squeeze || low_volume {
-                    // Uncertain market conditions: skip gap logic, use raw TA scores.
-                    // Tie → higher score wins; if equal, NO (conservative).
+                    // Uncertain conditions: use raw TA scores + market consensus.
                     let cond = if bb_squeeze { "BB squeeze" } else { "low volume" };
-                    if long_score >= short_score {
-                        ("YES", format!("{cond}: bull={long_score} >= bear={short_score} gap={gap_pct:+.2}%"))
+                    let ta_says_yes = long_score >= short_score;
+                    // Agree when TA and market align; use market as tiebreaker.
+                    let d = if ta_says_yes && !market_strong_no {
+                        "YES"
+                    } else if !ta_says_yes && !market_strong_yes {
+                        "NO"
+                    } else if market_says_yes {
+                        "YES"
                     } else {
-                        ("NO", format!("{cond}: bear={short_score} > bull={long_score} gap={gap_pct:+.2}%"))
-                    }
-                } else {
-                    // Normal decision: gap position + TA momentum.
-                    // Exactly at strike → higher score wins; if equal, NO (conservative).
-                    let d = if gap_pct > 1.0 {
-                        if net_score <= -4 { "NO" } else { "YES" }
-                    } else if gap_pct < -1.0 {
-                        if net_score >= 4 { "YES" } else { "NO" }
-                    } else if gap_pct > 0.0 {
-                        if net_score >= -2 { "YES" } else { "NO" }
-                    } else if gap_pct < 0.0 {
-                        if net_score >= 2 { "YES" } else { "NO" }
-                    } else {
-                        // Exactly at strike: higher score wins; tie → YES.
-                        if long_score >= short_score { "YES" } else { "NO" }
+                        "NO"
                     };
-                    (d, format!("gap={gap_pct:+.2}% net_score={net_score:+} (bull={long_score} bear={short_score})"))
+                    (d, format!("{cond}: bull={long_score} bear={short_score} market_yes_prob={market_yes_prob:.2} gap={gap_pct:+.2}%"))
+                } else {
+                    // Normal decision:
+                    //   gap_pct ≥ +0.5%  → comfortably above strike, lean YES
+                    //   gap_pct ≤ -0.5%  → comfortably below strike, lean NO
+                    //   |gap_pct| < 0.5% → near strike, TA + market decides
+                    //
+                    // Market consensus (yes_price) is used as a strong tie-breaker:
+                    // if market strongly disagrees with gap direction, respect it.
+                    let d = if gap_pct >= 0.5 {
+                        // Above strike — YES unless TA strongly bearish AND market agrees bearish
+                        if net_score <= -5 && market_strong_no { "NO" } else { "YES" }
+                    } else if gap_pct <= -0.5 {
+                        // Below strike — NO unless TA strongly bullish AND market agrees bullish
+                        if net_score >= 5 && market_strong_yes { "YES" } else { "NO" }
+                    } else if gap_pct > 0.0 {
+                        // Slightly above: lean YES; TA bearish + market bearish can flip it
+                        if net_score <= -3 && market_strong_no { "NO" } else { "YES" }
+                    } else if gap_pct < 0.0 {
+                        // Slightly below: lean NO; TA bullish + market bullish can flip it
+                        if net_score >= 3 && market_strong_yes { "YES" } else { "NO" }
+                    } else {
+                        // Exactly at strike: market consensus + TA
+                        if market_says_yes || long_score > short_score { "YES" } else { "NO" }
+                    };
+                    (d, format!(
+                        "gap={gap_pct:+.2}% net={net_score:+} (bull={long_score} bear={short_score}) market_yes={market_yes_prob:.2}"
+                    ))
                 };
 
                 serde_json::json!({
@@ -808,11 +832,62 @@ impl Tool for LimitlessPlaceOrdersTool {
             ));
         }
 
+        // Fetch live BTC price at order-placement time (T+10) for per-market
+        // strike comparison — more accurate than the signal's T+2 price.
+        let live_btc_price: Option<f64> = async {
+            let resp = reqwest::Client::new()
+                .get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+                .ok()?;
+            let v: serde_json::Value = resp.json().await.ok()?;
+            v["price"].as_str()?.parse::<f64>().ok()
+        }
+        .await;
+
+        tracing::info!(
+            live_btc = ?live_btc_price,
+            signal_btc = signal["btc_price_15m"].as_f64(),
+            "Live BTC price at order time"
+        );
+
         let mut order_results: Vec<serde_json::Value> = Vec::new();
 
         for market in &actionable {
             let market_id = market["market_id"].as_str().unwrap_or("");
-            let decision = market["decision"].as_str().unwrap_or("SKIP");
+            let signal_decision = market["decision"].as_str().unwrap_or("SKIP");
+
+            // Re-evaluate decision using live price vs strike if available.
+            let decision = if let Some(live_price) = live_btc_price {
+                let strike = market["strike"].as_f64().unwrap_or(0.0);
+                if strike > 0.0 {
+                    let live_gap_pct = (live_price - strike) / strike * 100.0;
+                    // Override if live price contradicts signal at T+10:
+                    // signal=YES but price now >0.5% below strike → flip to NO
+                    // signal=NO  but price now >0.5% above strike → flip to YES
+                    if signal_decision == "YES" && live_gap_pct < -0.5 {
+                        tracing::info!(
+                            market_id, live_gap_pct,
+                            "Live price flipped YES→NO (price dropped below strike)"
+                        );
+                        "NO"
+                    } else if signal_decision == "NO" && live_gap_pct > 0.5 {
+                        tracing::info!(
+                            market_id, live_gap_pct,
+                            "Live price flipped NO→YES (price rose above strike)"
+                        );
+                        "YES"
+                    } else {
+                        signal_decision
+                    }
+                } else {
+                    signal_decision
+                }
+            } else {
+                signal_decision
+            };
+
             let outcome = decision.to_lowercase();
 
             // Look up metadata from snapshot (slug, prices, liquidity)
@@ -1640,6 +1715,11 @@ fn validate_ta_freshness(ta: &TaSnapshot, max_minutes: i64) -> Result<(), ToolEr
 }
 
 /// Score LONG and SHORT independently using a 10-condition model.
+///
+/// Weights favour short-term indicators (5m, 15m) because we're predicting
+/// whether price will close above a strike within a ~5-minute window at T+10.
+/// 4h conditions act only as a broad context filter.
+///
 /// Returns (long_score, short_score) each in range 0–10.
 fn score_direction(
     ta_4h: &TaSnapshot,
@@ -1650,23 +1730,35 @@ fn score_direction(
     let mut long: u8 = 0;
     let mut short: u8 = 0;
 
-    // 1. RSI(14) on 1h
-    if ta_1h.rsi < 40.0 {
+    // ── Short-term (5m) — 3 conditions, most relevant for 5-min window ─────────
+
+    // 1. 5m MACD histogram direction (strongest short-term momentum signal)
+    if ta_5m.histogram > ta_5m.prev_histogram {
         long += 1;
     }
-    if ta_1h.rsi > 60.0 {
+    if ta_5m.histogram < ta_5m.prev_histogram {
         short += 1;
     }
 
-    // 2. MACD histogram on 1h trending in signal direction
-    if ta_1h.histogram > ta_1h.prev_histogram {
+    // 2. 5m EMA(12) vs EMA(26) — short-term trend cross
+    if ta_5m.ema_12 > ta_5m.ema_26 {
         long += 1;
     }
-    if ta_1h.histogram < ta_1h.prev_histogram {
+    if ta_5m.ema_12 < ta_5m.ema_26 {
         short += 1;
     }
 
-    // 3. EMA(12) vs EMA(26) on 15m
+    // 3. 5m RSI — short-term momentum state
+    if ta_5m.rsi < 45.0 {
+        long += 1;
+    }
+    if ta_5m.rsi > 55.0 {
+        short += 1;
+    }
+
+    // ── Medium-term (15m) — 3 conditions ────────────────────────────────────────
+
+    // 4. 15m EMA(12) vs EMA(26) — medium-term trend
     if ta_15m.ema_12 > ta_15m.ema_26 {
         long += 1;
     }
@@ -1674,23 +1766,7 @@ fn score_direction(
         short += 1;
     }
 
-    // 4. current_price vs SMA(50) on 4h
-    if ta_4h.current_price > ta_4h.sma_50 {
-        long += 1;
-    }
-    if ta_4h.current_price < ta_4h.sma_50 {
-        short += 1;
-    }
-
-    // 5. BB position on 1h
-    if ta_1h.bb_position < 0.25 {
-        long += 1;
-    }
-    if ta_1h.bb_position > 0.75 {
-        short += 1;
-    }
-
-    // 6. RSI(14) on 15m
+    // 5. 15m RSI — medium-term momentum state
     if ta_15m.rsi < 45.0 {
         long += 1;
     }
@@ -1698,33 +1774,45 @@ fn score_direction(
         short += 1;
     }
 
-    // 7. MACD histogram on 4h
-    if ta_4h.histogram > 0.0 {
+    // 6. 15m MACD histogram direction
+    if ta_15m.histogram > ta_15m.prev_histogram {
         long += 1;
     }
-    if ta_4h.histogram < 0.0 {
+    if ta_15m.histogram < ta_15m.prev_histogram {
         short += 1;
     }
 
-    // 8. Volume confirmation (adds to both — direction-agnostic momentum)
-    if ta_15m.volume_ratio > 1.3 {
+    // ── Longer-term (1h, 4h) — 4 conditions, context only ───────────────────────
+
+    // 7. 1h RSI — broader momentum state
+    if ta_1h.rsi < 40.0 {
         long += 1;
+    }
+    if ta_1h.rsi > 60.0 {
         short += 1;
     }
 
-    // 9. RSI(14) on 4h directional
-    if ta_4h.rsi < 50.0 {
+    // 8. 1h MACD histogram direction
+    if ta_1h.histogram > ta_1h.prev_histogram {
         long += 1;
     }
-    if ta_4h.rsi > 50.0 {
+    if ta_1h.histogram < ta_1h.prev_histogram {
         short += 1;
     }
 
-    // 10. 5m MACD histogram
-    if ta_5m.histogram > 0.0 {
+    // 9. 1h BB position — mean-reversion context
+    if ta_1h.bb_position < 0.25 {
         long += 1;
     }
-    if ta_5m.histogram < 0.0 {
+    if ta_1h.bb_position > 0.75 {
+        short += 1;
+    }
+
+    // 10. 4h trend context: price vs SMA(50)
+    if ta_4h.current_price > ta_4h.sma_50 {
+        long += 1;
+    }
+    if ta_4h.current_price < ta_4h.sma_50 {
         short += 1;
     }
 
